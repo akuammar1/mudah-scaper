@@ -18,7 +18,8 @@ HEADERS = {
 
 BASE_URL      = "https://www.mudah.my/penang/properties-for-sale"
 MAX_PAGES     = 50
-SLEEP_BETWEEN = 4
+SLEEP_BETWEEN = 5      # 5s between pages
+RETRY_WAIT    = 60     # 60s wait on 429
 
 OUTPUT_DIR  = "data"
 TODAY       = datetime.now().strftime("%Y-%m-%d")
@@ -38,19 +39,33 @@ def page_url(page):
     return f"{BASE_URL}?adsby=false&o={page}"
 
 
+def fetch_with_retry(url, retries=3):
+    """Fetch a URL, retrying up to `retries` times on 429."""
+    for attempt in range(1, retries + 1):
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        print(f"     HTTP {resp.status_code} | {len(resp.text)} chars")
+        if resp.status_code == 200:
+            return resp
+        elif resp.status_code == 429:
+            if attempt < retries:
+                print(f"     ⏳ Rate limited (attempt {attempt}/{retries}) — waiting {RETRY_WAIT}s...")
+                time.sleep(RETRY_WAIT)
+            else:
+                print(f"     🛑 Rate limited {retries} times — giving up on this page")
+                return None
+        else:
+            print(f"     ❌ Unexpected status {resp.status_code}")
+            return None
+    return None
+
+
 def fetch_page(page):
     url = page_url(page)
     print(f"  🌐 {url}")
-    resp = requests.get(url, headers=HEADERS, timeout=20)
-    print(f"     HTTP {resp.status_code} | {len(resp.text)} chars")
 
-    if resp.status_code == 429:
-        print("     ⏳ Rate limited — waiting 30s then retrying...")
-        time.sleep(30)
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        print(f"     Retry HTTP {resp.status_code}")
-        if resp.status_code != 200:
-            return None
+    resp = fetch_with_retry(url)
+    if resp is None:
+        return None   # None = stop scraping entirely
 
     match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', resp.text, re.DOTALL)
     if not match:
@@ -59,6 +74,7 @@ def fetch_page(page):
 
     data = json.loads(match.group(1))
     ads = data["props"]["pageProps"]["initialStore"].get("ads", [])
+    print(f"     📦 Raw ads in page: {len(ads)}")
     return parse_ads(ads)
 
 
@@ -69,7 +85,6 @@ def parse_ads(ads):
     for ad in ads:
         try:
             a = ad.get("attributes", {})
-
             results.append({
                 "listing_id":    str(ad.get("id") or a.get("listId", "N/A")),
                 "title":         a.get("subject", "N/A"),
@@ -120,19 +135,18 @@ def main():
         try:
             items = fetch_page(page)
             if items is None:
-                print("     🛑 Stopping — repeated rate limit")
+                print("     🛑 Stopping due to rate limit")
                 break
             if not items:
-                print(f"     ⚠️  Empty — stopping at page {page}")
+                print(f"     ⚠️  No listings — stopping at page {page}")
                 break
             all_listings.extend(items)
-            # Print sample row from first page
             if page == 1:
                 s = items[0]
-                print(f"     📝 Sample: {s['title']} | {s['price']} | {s['beds']} bed {s['baths']} bath | {s['size_sqft']} sqft | {s['location']}")
+                print(f"     📝 Sample: {s['title']} | {s['price']} | {s['beds']} bed | {s['size_sqft']} sqft | {s['location']}")
             print(f"     ✅ Got {len(items)} | Total: {len(all_listings)}")
         except Exception as e:
-            print(f"     ❌ {e}")
+            print(f"     ❌ Error: {e}")
             break
         time.sleep(SLEEP_BETWEEN)
 
