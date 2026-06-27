@@ -86,7 +86,8 @@ def parse_ads(ads):
 
             # Phone — hidden listings show None
             phone_raw = a.get("phone")
-            phone = str(phone_raw) if phone_raw and not a.get("phoneHidden") else "N/A"
+            # Prefix with ' so Excel treats it as text and preserves leading zero
+            phone = f"'{phone_raw}" if phone_raw and not a.get("phoneHidden") else "N/A"
 
             results.append({
                 "listing_id":    str(ad.get("id") or a.get("listId", "N/A")),
