@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 
 # ── Config ───────────────────────────────────────────────────────────────────
-BASE_URL       = "https://www.mudah.my/malaysia/properties-for-sale"
+BASE_URL       = "https://www.mudah.my/penang/properties-for-sale"
 ADSBY          = "false"   # matches ?adsby=false in the URL
 MAX_PAGES      = 5
 SLEEP_BETWEEN  = 2         # seconds between requests
