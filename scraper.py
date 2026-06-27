@@ -18,7 +18,7 @@ HEADERS = {
 
 BASE_URL      = "https://www.mudah.my/penang/properties-for-sale"
 MAX_PAGES     = 50
-SLEEP_BETWEEN = 2
+SLEEP_BETWEEN = 4   # increased to avoid 429
 
 OUTPUT_DIR  = "data"
 TODAY       = datetime.now().strftime("%Y-%m-%d")
@@ -43,45 +43,33 @@ def fetch_page(page):
     resp = requests.get(url, headers=HEADERS, timeout=20)
     print(f"     HTTP {resp.status_code} | {len(resp.text)} chars")
 
+    if resp.status_code == 429:
+        print("     ⏳ Rate limited — waiting 30s then retrying once...")
+        time.sleep(30)
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        print(f"     Retry HTTP {resp.status_code}")
+        if resp.status_code != 200:
+            return None  # None = stop scraping
+
     match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', resp.text, re.DOTALL)
     if not match:
         print("     ❌ No __NEXT_DATA__ found")
         return []
 
     data = json.loads(match.group(1))
+    ads = data["props"]["pageProps"]["initialStore"].get("ads", [])
 
-    # Path: props → pageProps → initialStore → ads
-    initial_store = data["props"]["pageProps"]["initialStore"]
-    print(f"     📂 initialStore keys: {list(initial_store.keys())}")
+    if not ads:
+        return []
 
-    ads_raw = initial_store.get("ads", {})
-    print(f"     📂 ads type: {type(ads_raw).__name__}")
-
-    # ads could be a list, or a dict like {"data": [...], "total": N}
-    if isinstance(ads_raw, list):
-        ads = ads_raw
-    elif isinstance(ads_raw, dict):
-        print(f"     📂 ads dict keys: {list(ads_raw.keys())}")
-        # try common keys
-        ads = (
-            ads_raw.get("data")
-            or ads_raw.get("ads")
-            or ads_raw.get("listing")
-            or ads_raw.get("items")
-            or ads_raw.get("results")
-            or []
-        )
-        # if still nothing, check if values are dicts (keyed by listing_id)
-        if not ads:
-            vals = list(ads_raw.values())
-            if vals and isinstance(vals[0], dict):
-                ads = vals
-    else:
-        ads = []
-
-    print(f"     ✅ Ads found: {len(ads)}")
-    if ads:
-        print(f"     📋 First ad keys: {list(ads[0].keys())[:10]}")
+    # Debug first ad structure once
+    if page == 1:
+        first = ads[0]
+        print(f"     📋 First ad keys: {list(first.keys())}")
+        attrs = first.get("attributes", {})
+        print(f"     📋 attributes keys: {list(attrs.keys())[:15]}")
+        links = first.get("links", {})
+        print(f"     📋 links keys: {list(links.keys())}")
 
     return parse_ads(ads)
 
@@ -89,32 +77,58 @@ def fetch_page(page):
 def parse_ads(ads):
     results = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     for ad in ads:
         try:
+            # Mudah uses JSON:API format — id is top level, data is in attributes
             attrs = ad.get("attributes", {})
+            links = ad.get("links", {})
 
             def attr(key):
-                v = attrs.get(key, {})
-                return str(v.get("value", "N/A")) if isinstance(v, dict) else str(v or "N/A")
+                v = attrs.get(key)
+                if v is None:
+                    return "N/A"
+                if isinstance(v, dict):
+                    return str(v.get("value") or v.get("label") or "N/A")
+                return str(v)
 
-            price_raw = ad.get("price", {})
-            price = str(price_raw.get("value", "N/A")) if isinstance(price_raw, dict) else str(price_raw or "N/A")
+            listing_id = str(ad.get("id") or ad.get("list_id") or "N/A")
+            title      = attr("subject") or attr("title") or attr("name")
+            price      = attr("price") or attr("asking_price")
+            location   = attr("region") or attr("area") or attr("location")
+            state      = attr("state_name") or attr("state") or "Penang"
+            beds       = attr("rooms") or attr("bedrooms") or attr("bedroom")
+            baths      = attr("bathrooms") or attr("bathroom")
+            size       = attr("size") or attr("floor_size") or attr("built_up")
+            ptype      = attr("property_type") or attr("sub_catname") or attr("category")
+
+            # URL from links object
+            link = (
+                links.get("self")
+                or links.get("html")
+                or links.get("url")
+                or attrs.get("url")
+                or f"https://www.mudah.my/ad/{listing_id}.htm"
+            )
+            if isinstance(link, dict):
+                link = link.get("href", f"https://www.mudah.my/ad/{listing_id}.htm")
 
             results.append({
-                "listing_id":    str(ad.get("list_id") or "N/A"),
-                "title":         ad.get("subject", "N/A"),
+                "listing_id":    listing_id,
+                "title":         title,
                 "price":         price,
-                "location":      ad.get("region", "N/A"),
-                "state":         ad.get("state_name", "Penang"),
-                "beds":          attr("rooms") or attr("bedrooms"),
-                "baths":         attr("bathrooms"),
-                "size_sqft":     attr("size") or attr("floor_area"),
-                "property_type": attr("property_type") or attr("sub_catname"),
-                "url":           ad.get("url", f"https://www.mudah.my/ad/{ad.get('list_id','')}.htm"),
+                "location":      location,
+                "state":         state,
+                "beds":          beds,
+                "baths":         baths,
+                "size_sqft":     size,
+                "property_type": ptype,
+                "url":           link,
                 "scraped_at":    now,
             })
         except Exception as e:
             print(f"     ⚠️  Skipped ad: {e}")
+
     return results
 
 
@@ -147,11 +161,18 @@ def main():
         print(f"\n  📄 Page {page}/{MAX_PAGES}")
         try:
             items = fetch_page(page)
+            if items is None:
+                print("     🛑 Stopping due to repeated rate limit")
+                break
             if not items:
                 print(f"     ⚠️  Empty — stopping at page {page}")
                 break
             all_listings.extend(items)
-            print(f"     ✅ Got {len(items)} | Total so far: {len(all_listings)}")
+            print(f"     ✅ Got {len(items)} | Total: {len(all_listings)}")
+            # Print sample row from first page
+            if page == 1 and items:
+                s = items[0]
+                print(f"     📝 Sample: [{s['listing_id']}] {s['title'][:40]} | {s['price']} | {s['location']}")
         except Exception as e:
             print(f"     ❌ {e}")
             break
@@ -163,11 +184,14 @@ def main():
     if new:
         save_csv(OUTPUT_FILE, new, mode="w")
         save_csv(MASTER_FILE, new, mode="a")
-        print(f"💾 Saved daily  → {OUTPUT_FILE}")
-        print(f"💾 Saved master → {MASTER_FILE}")
+        print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows)")
+        print(f"💾 Master → {MASTER_FILE}")
+    elif all_listings:
+        print("ℹ️  All listings already in master — nothing new to save.")
+        save_csv(OUTPUT_FILE, [], mode="w")
     else:
         save_csv(OUTPUT_FILE, [], mode="w")
-        print("ℹ️  No new listings.")
+        print("ℹ️  No listings scraped.")
 
     print("\n✅ Done!\n")
 
