@@ -37,26 +37,6 @@ def page_url(page):
     return f"{BASE_URL}?adsby=false&o={page}"
 
 
-def find_ads_recursive(obj, path=""):
-    """Walk every node in the JSON tree and return the first list that looks like ads."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            result = find_ads_recursive(v, f"{path}.{k}")
-            if result:
-                return result
-    elif isinstance(obj, list) and len(obj) > 0:
-        first = obj[0]
-        if isinstance(first, dict) and ("list_id" in first or "subject" in first):
-            print(f"     🎯 Found ads at: {path}  (count={len(obj)})")
-            print(f"        First item keys: {list(first.keys())[:10]}")
-            return obj
-        for item in obj[:3]:
-            result = find_ads_recursive(item, f"{path}[]")
-            if result:
-                return result
-    return None
-
-
 def fetch_page(page):
     url = page_url(page)
     print(f"  🌐 {url}")
@@ -68,32 +48,40 @@ def fetch_page(page):
         print("     ❌ No __NEXT_DATA__ found")
         return []
 
-    try:
-        data = json.loads(match.group(1))
-    except Exception as e:
-        print(f"     ❌ JSON parse error: {e}")
-        return []
+    data = json.loads(match.group(1))
 
-    # Print top 2 levels to understand structure
-    print("     📂 JSON top-level keys:", list(data.keys()))
-    props = data.get("props", {})
-    print("     📂 props keys:", list(props.keys()))
-    page_props = props.get("pageProps", {})
-    print("     📂 pageProps keys:", list(page_props.keys()))
-    for k, v in page_props.items():
-        if isinstance(v, dict):
-            print(f"        pageProps.{k} → dict keys: {list(v.keys())[:8]}")
-        elif isinstance(v, list):
-            print(f"        pageProps.{k} → list len={len(v)}", end="")
-            if v and isinstance(v[0], dict):
-                print(f", item[0] keys: {list(v[0].keys())[:6]}", end="")
-            print()
+    # Path: props → pageProps → initialStore → ads
+    initial_store = data["props"]["pageProps"]["initialStore"]
+    print(f"     📂 initialStore keys: {list(initial_store.keys())}")
 
-    # Now hunt recursively
-    ads = find_ads_recursive(data)
-    if not ads:
-        print("     ❌ Could not find ads anywhere in JSON tree")
-        return []
+    ads_raw = initial_store.get("ads", {})
+    print(f"     📂 ads type: {type(ads_raw).__name__}")
+
+    # ads could be a list, or a dict like {"data": [...], "total": N}
+    if isinstance(ads_raw, list):
+        ads = ads_raw
+    elif isinstance(ads_raw, dict):
+        print(f"     📂 ads dict keys: {list(ads_raw.keys())}")
+        # try common keys
+        ads = (
+            ads_raw.get("data")
+            or ads_raw.get("ads")
+            or ads_raw.get("listing")
+            or ads_raw.get("items")
+            or ads_raw.get("results")
+            or []
+        )
+        # if still nothing, check if values are dicts (keyed by listing_id)
+        if not ads:
+            vals = list(ads_raw.values())
+            if vals and isinstance(vals[0], dict):
+                ads = vals
+    else:
+        ads = []
+
+    print(f"     ✅ Ads found: {len(ads)}")
+    if ads:
+        print(f"     📋 First ad keys: {list(ads[0].keys())[:10]}")
 
     return parse_ads(ads)
 
@@ -104,6 +92,7 @@ def parse_ads(ads):
     for ad in ads:
         try:
             attrs = ad.get("attributes", {})
+
             def attr(key):
                 v = attrs.get(key, {})
                 return str(v.get("value", "N/A")) if isinstance(v, dict) else str(v or "N/A")
@@ -151,7 +140,7 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     existing_ids = load_existing_ids(MASTER_FILE)
-    print(f"\n📂 Known listings in master: {len(existing_ids)}")
+    print(f"📂 Known listings in master: {len(existing_ids)}\n")
 
     all_listings = []
     for page in range(1, MAX_PAGES + 1):
@@ -162,7 +151,7 @@ def main():
                 print(f"     ⚠️  Empty — stopping at page {page}")
                 break
             all_listings.extend(items)
-            print(f"     ✅ Got {len(items)} | Total: {len(all_listings)}")
+            print(f"     ✅ Got {len(items)} | Total so far: {len(all_listings)}")
         except Exception as e:
             print(f"     ❌ {e}")
             break
@@ -174,10 +163,12 @@ def main():
     if new:
         save_csv(OUTPUT_FILE, new, mode="w")
         save_csv(MASTER_FILE, new, mode="a")
-        print(f"💾 Saved → {OUTPUT_FILE}")
+        print(f"💾 Saved daily  → {OUTPUT_FILE}")
+        print(f"💾 Saved master → {MASTER_FILE}")
     else:
         save_csv(OUTPUT_FILE, [], mode="w")
         print("ℹ️  No new listings.")
+
     print("\n✅ Done!\n")
 
 
