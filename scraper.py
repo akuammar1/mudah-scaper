@@ -18,7 +18,7 @@ HEADERS = {
 
 BASE_URL      = "https://www.mudah.my/penang/properties-for-sale"
 MAX_PAGES     = 50
-SLEEP_BETWEEN = 4   # increased to avoid 429
+SLEEP_BETWEEN = 4
 
 OUTPUT_DIR  = "data"
 TODAY       = datetime.now().strftime("%Y-%m-%d")
@@ -27,7 +27,8 @@ MASTER_FILE = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
 
 CSV_FIELDS = [
     "listing_id", "title", "price", "location", "state",
-    "beds", "baths", "size_sqft", "property_type", "url", "scraped_at",
+    "beds", "baths", "size_sqft", "property_type", "title_type",
+    "url", "scraped_at",
 ]
 
 
@@ -44,12 +45,12 @@ def fetch_page(page):
     print(f"     HTTP {resp.status_code} | {len(resp.text)} chars")
 
     if resp.status_code == 429:
-        print("     ⏳ Rate limited — waiting 30s then retrying once...")
+        print("     ⏳ Rate limited — waiting 30s then retrying...")
         time.sleep(30)
         resp = requests.get(url, headers=HEADERS, timeout=20)
         print(f"     Retry HTTP {resp.status_code}")
         if resp.status_code != 200:
-            return None  # None = stop scraping
+            return None
 
     match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', resp.text, re.DOTALL)
     if not match:
@@ -58,19 +59,6 @@ def fetch_page(page):
 
     data = json.loads(match.group(1))
     ads = data["props"]["pageProps"]["initialStore"].get("ads", [])
-
-    if not ads:
-        return []
-
-    # Debug first ad structure once
-    if page == 1:
-        first = ads[0]
-        print(f"     📋 First ad keys: {list(first.keys())}")
-        attrs = first.get("attributes", {})
-        print(f"     📋 attributes keys: {list(attrs.keys())[:15]}")
-        links = first.get("links", {})
-        print(f"     📋 links keys: {list(links.keys())}")
-
     return parse_ads(ads)
 
 
@@ -80,50 +68,20 @@ def parse_ads(ads):
 
     for ad in ads:
         try:
-            # Mudah uses JSON:API format — id is top level, data is in attributes
-            attrs = ad.get("attributes", {})
-            links = ad.get("links", {})
-
-            def attr(key):
-                v = attrs.get(key)
-                if v is None:
-                    return "N/A"
-                if isinstance(v, dict):
-                    return str(v.get("value") or v.get("label") or "N/A")
-                return str(v)
-
-            listing_id = str(ad.get("id") or ad.get("list_id") or "N/A")
-            title      = attr("subject") or attr("title") or attr("name")
-            price      = attr("price") or attr("asking_price")
-            location   = attr("region") or attr("area") or attr("location")
-            state      = attr("state_name") or attr("state") or "Penang"
-            beds       = attr("rooms") or attr("bedrooms") or attr("bedroom")
-            baths      = attr("bathrooms") or attr("bathroom")
-            size       = attr("size") or attr("floor_size") or attr("built_up")
-            ptype      = attr("property_type") or attr("sub_catname") or attr("category")
-
-            # URL from links object
-            link = (
-                links.get("self")
-                or links.get("html")
-                or links.get("url")
-                or attrs.get("url")
-                or f"https://www.mudah.my/ad/{listing_id}.htm"
-            )
-            if isinstance(link, dict):
-                link = link.get("href", f"https://www.mudah.my/ad/{listing_id}.htm")
+            a = ad.get("attributes", {})
 
             results.append({
-                "listing_id":    listing_id,
-                "title":         title,
-                "price":         price,
-                "location":      location,
-                "state":         state,
-                "beds":          beds,
-                "baths":         baths,
-                "size_sqft":     size,
-                "property_type": ptype,
-                "url":           link,
+                "listing_id":    str(ad.get("id") or a.get("listId", "N/A")),
+                "title":         a.get("subject", "N/A"),
+                "price":         a.get("priceLabel", str(a.get("price", "N/A"))),
+                "location":      a.get("locationLabel") or a.get("subareaName", "N/A"),
+                "state":         a.get("regionName", "Penang"),
+                "beds":          str(a.get("roomsName", "N/A")),
+                "baths":         str(a.get("bathroomName", "N/A")),
+                "size_sqft":     str(a.get("size", "N/A")),
+                "property_type": a.get("propertyTypeName", "N/A"),
+                "title_type":    a.get("titleTypeName", "N/A"),
+                "url":           a.get("adviewUrl", f"https://www.mudah.my/ad/{ad.get('id')}.htm"),
                 "scraped_at":    now,
             })
         except Exception as e:
@@ -162,17 +120,17 @@ def main():
         try:
             items = fetch_page(page)
             if items is None:
-                print("     🛑 Stopping due to repeated rate limit")
+                print("     🛑 Stopping — repeated rate limit")
                 break
             if not items:
                 print(f"     ⚠️  Empty — stopping at page {page}")
                 break
             all_listings.extend(items)
-            print(f"     ✅ Got {len(items)} | Total: {len(all_listings)}")
             # Print sample row from first page
-            if page == 1 and items:
+            if page == 1:
                 s = items[0]
-                print(f"     📝 Sample: [{s['listing_id']}] {s['title'][:40]} | {s['price']} | {s['location']}")
+                print(f"     📝 Sample: {s['title']} | {s['price']} | {s['beds']} bed {s['baths']} bath | {s['size_sqft']} sqft | {s['location']}")
+            print(f"     ✅ Got {len(items)} | Total: {len(all_listings)}")
         except Exception as e:
             print(f"     ❌ {e}")
             break
@@ -187,7 +145,7 @@ def main():
         print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows)")
         print(f"💾 Master → {MASTER_FILE}")
     elif all_listings:
-        print("ℹ️  All listings already in master — nothing new to save.")
+        print("ℹ️  All listings already in master — nothing new.")
         save_csv(OUTPUT_FILE, [], mode="w")
     else:
         save_csv(OUTPUT_FILE, [], mode="w")
