@@ -26,10 +26,18 @@ TODAY       = datetime.now().strftime("%Y-%m-%d")
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"mudah_penang_{TODAY}.csv")
 MASTER_FILE = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
 
+# All fields — stored in master file (internal use)
 CSV_FIELDS = [
     "listing_id", "title", "price", "location", "state",
     "beds", "baths", "size_sqft", "property_type", "title_type",
     "phone", "url", "scraped_at",
+]
+
+# Cleaned up — what appears in the daily output file
+OUTPUT_FIELDS = [
+    "title", "price", "location",
+    "beds", "baths", "size_sqft", "property_type", "title_type",
+    "phone", "url",
 ]
 
 
@@ -50,7 +58,7 @@ def fetch_with_retry(url, retries=3):
                 print(f"     ⏳ Rate limited (attempt {attempt}/{retries}) — waiting {RETRY_WAIT}s...")
                 time.sleep(RETRY_WAIT)
             else:
-                print(f"     🛑 Rate limited {retries} times — giving up on this page")
+                print(f"     🛑 Rate limited {retries} times — giving up")
                 return None
         else:
             print(f"     ❌ Unexpected status {resp.status_code}")
@@ -84,9 +92,7 @@ def parse_ads(ads):
         try:
             a = ad.get("attributes", {})
 
-            # Phone — hidden listings show None
             phone_raw = a.get("phone")
-            # Prefix with ' so Excel treats it as text and preserves leading zero
             phone = f"'{phone_raw}" if phone_raw and not a.get("phoneHidden") else "N/A"
 
             results.append({
@@ -117,10 +123,10 @@ def load_existing_ids(filepath):
         return {row["listing_id"] for row in csv.DictReader(f) if row.get("listing_id")}
 
 
-def save_csv(filepath, rows, mode="w"):
+def save_csv(filepath, rows, fields, mode="w"):
     write_header = mode == "w" or not os.path.exists(filepath)
     with open(filepath, mode, newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
         if write_header:
             writer.writeheader()
         writer.writerows(rows)
@@ -159,15 +165,17 @@ def main():
     print(f"\n📦 Scraped: {len(all_listings)} | New: {len(new)}")
 
     if new:
-        save_csv(OUTPUT_FILE, new, mode="w")
-        save_csv(MASTER_FILE, new, mode="a")
+        # Daily output — clean columns only
+        save_csv(OUTPUT_FILE, new, fields=OUTPUT_FIELDS, mode="w")
+        # Master — all columns including listing_id, state, scraped_at
+        save_csv(MASTER_FILE, new, fields=CSV_FIELDS, mode="a")
         print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows)")
         print(f"💾 Master → {MASTER_FILE}")
     elif all_listings:
         print("ℹ️  All listings already in master — nothing new.")
-        save_csv(OUTPUT_FILE, [], mode="w")
+        save_csv(OUTPUT_FILE, [], fields=OUTPUT_FIELDS, mode="w")
     else:
-        save_csv(OUTPUT_FILE, [], mode="w")
+        save_csv(OUTPUT_FILE, [], fields=OUTPUT_FIELDS, mode="w")
         print("ℹ️  No listings scraped.")
 
     print("\n✅ Done!\n")
