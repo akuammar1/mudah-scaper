@@ -16,20 +16,21 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          node-version: '24'
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install requests==2.32.3 beautifulsoup4==4.12.3
 
       - name: Run scraper
         run: python scraper.py
 
-      # Commit the updated CSV files back into the repo
       - name: Commit CSV results
         run: |
           git config user.name  "github-actions[bot]"
