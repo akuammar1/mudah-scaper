@@ -3,18 +3,19 @@ import csv
 import time
 import os
 import re
+import json
 from datetime import datetime
 
 # ── Config ───────────────────────────────────────────────────────────────────
-BASE_URL       = "https://www.mudah.my/penang/properties-for-sale"
-ADSBY          = "false"   # matches ?adsby=false in the URL
-MAX_PAGES      = 5
-SLEEP_BETWEEN  = 2         # seconds between requests
+BASE_URL      = "https://www.mudah.my/penang/properties-for-sale"
+ADSBY         = "false"
+MAX_PAGES     = 50         # increase this for more pages
+SLEEP_BETWEEN = 2
 
 OUTPUT_DIR  = "data"
 TODAY       = datetime.now().strftime("%Y-%m-%d")
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"mudah_{TODAY}.csv")
-MASTER_FILE = os.path.join(OUTPUT_DIR, "mudah_all.csv")
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"mudah_penang_{TODAY}.csv")
+MASTER_FILE = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
 
 CSV_FIELDS = [
     "listing_id", "title", "price", "location", "state",
@@ -28,157 +29,152 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json, text/plain, */*",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.mudah.my/",
 }
 
-# Mudah's internal API endpoint
-API_URL = "https://search.mudah.my/v1/search"
 
-# ── Fetch via Mudah's search API ─────────────────────────────────────────────
+# ── Build page URL ────────────────────────────────────────────────────────────
+def page_url(page: int) -> str:
+    if page == 1:
+        return f"{BASE_URL}?adsby={ADSBY}"
+    return f"{BASE_URL}?adsby={ADSBY}&o={page}"
+
+
+# ── Extract JSON embedded in HTML ─────────────────────────────────────────────
 def fetch_page(page: int) -> list[dict]:
-    """
-    Call Mudah's search API for one page of property listings.
-    Falls back to HTML scraping if the API call fails.
-    """
-    params = {
-        "category":    "1000",      # Properties
-        "ad_type":     "s",         # For sale
-        "limit":       "30",
-        "from":        str((page - 1) * 30),
-        "adsby":       ADSBY,
-        "o":           str(page),
-    }
+    url = page_url(page)
+    print(f"  🌐 Fetching: {url}")
 
-    try:
-        resp = requests.get(API_URL, headers=HEADERS, params=params, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+    resp = requests.get(url, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    html = resp.text
 
-        listings = []
-        ads = data.get("data", {}).get("ads", []) or data.get("ads", []) or []
+    print(f"     HTTP {resp.status_code} | {len(html)} chars received")
 
-        for ad in ads:
+    # ── Strategy 1: window.__INITIAL_STATE__ ─────────────────────────────────
+    match = re.search(r"window\.__INITIAL_STATE__\s*=\s*(\{.+?\});\s*</script>", html, re.DOTALL)
+    if match:
+        print("     ✅ Found __INITIAL_STATE__")
+        try:
+            state = json.loads(match.group(1))
+            ads = (
+                state.get("listings", {}).get("listingData", {}).get("ads", [])
+                or state.get("adList", {}).get("ads", [])
+                or state.get("listingData", {}).get("ads", [])
+                or []
+            )
+            if ads:
+                print(f"     ✅ Strategy 1 got {len(ads)} ads")
+                return parse_ads(ads)
+        except Exception as e:
+            print(f"     ⚠️  Strategy 1 JSON parse failed: {e}")
+
+    # ── Strategy 2: __NEXT_DATA__ (Next.js) ──────────────────────────────────
+    match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', html, re.DOTALL)
+    if match:
+        print("     ✅ Found __NEXT_DATA__")
+        try:
+            data = json.loads(match.group(1))
+            # Navigate into Next.js page props
+            props = data.get("props", {}).get("pageProps", {})
+            ads = (
+                props.get("listings", {}).get("ads", [])
+                or props.get("ads", [])
+                or props.get("data", {}).get("ads", [])
+                or []
+            )
+            if ads:
+                print(f"     ✅ Strategy 2 got {len(ads)} ads")
+                return parse_ads(ads)
+        except Exception as e:
+            print(f"     ⚠️  Strategy 2 JSON parse failed: {e}")
+
+    # ── Strategy 3: any JSON blob containing "list_id" ───────────────────────
+    matches = re.findall(r'\{[^{}]*"list_id"[^{}]*\}', html)
+    if matches:
+        print(f"     ✅ Strategy 3: found {len(matches)} raw ad blobs")
+        ads = []
+        for m in matches:
+            try:
+                ads.append(json.loads(m))
+            except Exception:
+                pass
+        if ads:
+            return parse_ads(ads)
+
+    print("     ❌ No listing data found on this page — might be JS-rendered")
+    # Dump a snippet so we can debug
+    print("     📋 HTML snippet (first 500 chars):")
+    print("     " + html[:500].replace("\n", " "))
+    return []
+
+
+def parse_ads(ads: list) -> list[dict]:
+    results = []
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for ad in ads:
+        try:
             attrs = ad.get("attributes", {})
 
-            # Extract nested attribute value safely
             def attr(key):
                 v = attrs.get(key, {})
                 if isinstance(v, dict):
-                    return v.get("value", "N/A")
-                return v or "N/A"
+                    return str(v.get("value", "N/A"))
+                return str(v) if v else "N/A"
 
             listing_id = str(ad.get("list_id") or ad.get("id", "N/A"))
-            title      = ad.get("subject", "N/A")
-            price_raw  = ad.get("price", {})
-            price      = price_raw.get("value", "N/A") if isinstance(price_raw, dict) else str(price_raw)
-            region     = ad.get("region", "N/A")
-            state      = ad.get("state_name") or ad.get("region_name", "N/A")
-            prop_type  = attr("property_type") or attr("category_name")
-            beds       = attr("rooms")
+            title      = ad.get("subject") or ad.get("title", "N/A")
+
+            price_raw = ad.get("price", {})
+            if isinstance(price_raw, dict):
+                price = str(price_raw.get("value", "N/A"))
+            else:
+                price = str(price_raw) if price_raw else "N/A"
+
+            location   = ad.get("region") or ad.get("location", "N/A")
+            state      = ad.get("state_name") or ad.get("region_name", "Penang")
+            beds       = attr("rooms") or attr("bedrooms")
             baths      = attr("bathrooms")
-            size       = attr("size")
+            size       = attr("size") or attr("floor_area")
+            ptype      = attr("property_type") or attr("sub_catname")
+            link       = ad.get("url") or f"https://www.mudah.my/ad/{listing_id}.htm"
 
-            link = ad.get("url") or f"https://www.mudah.my/ad/{listing_id}.htm"
-
-            listings.append({
-                "listing_id":   listing_id,
-                "title":        title,
-                "price":        price,
-                "location":     region,
-                "state":        state,
-                "beds":         beds,
-                "baths":        baths,
-                "size_sqft":    size,
-                "property_type": prop_type,
-                "url":          link,
-                "scraped_at":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            results.append({
+                "listing_id":    listing_id,
+                "title":         title,
+                "price":         price,
+                "location":      location,
+                "state":         state,
+                "beds":          beds,
+                "baths":         baths,
+                "size_sqft":     size,
+                "property_type": ptype,
+                "url":           link,
+                "scraped_at":    now,
             })
+        except Exception as e:
+            print(f"     ⚠️  Skipped one ad: {e}")
 
-        return listings
-
-    except Exception as e:
-        print(f"     ⚠️  API call failed: {e}")
-        return fetch_page_html(page)   # fallback
-
-
-# ── HTML fallback scraper ─────────────────────────────────────────────────────
-def fetch_page_html(page: int) -> list[dict]:
-    """Fallback: scrape the HTML listing page directly."""
-    if page == 1:
-        url = f"{BASE_URL}?adsby={ADSBY}"
-    else:
-        url = f"{BASE_URL}?adsby={ADSBY}&o={page}"
-
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-
-    # Mudah embeds listing data as JSON inside a <script> tag
-    # Pattern: window.__INITIAL_STATE__ = {...}
-    match = re.search(r"window\.__INITIAL_STATE__\s*=\s*(\{.*?\});", resp.text, re.DOTALL)
-    if not match:
-        print("     ⚠️  Could not find embedded JSON in page HTML")
-        return []
-
-    import json
-    try:
-        state = json.loads(match.group(1))
-    except json.JSONDecodeError as e:
-        print(f"     ⚠️  JSON parse error: {e}")
-        return []
-
-    # Navigate into the state tree to find ads
-    # Structure varies but typically: listings.listingData.ads
-    ads = (
-        state.get("listings", {}).get("listingData", {}).get("ads", [])
-        or state.get("adList", {}).get("ads", [])
-        or []
-    )
-
-    listings = []
-    for ad in ads:
-        listing_id = str(ad.get("list_id") or ad.get("id", "N/A"))
-        title      = ad.get("subject", "N/A")
-        price      = str(ad.get("price", {}).get("value", "N/A"))
-        region     = ad.get("region", "N/A")
-        state_name = ad.get("state_name", "N/A")
-        link       = ad.get("url", f"https://www.mudah.my/ad/{listing_id}.htm")
-
-        attrs  = ad.get("attributes", {})
-        beds   = attrs.get("rooms", {}).get("value", "N/A")
-        baths  = attrs.get("bathrooms", {}).get("value", "N/A")
-        size   = attrs.get("size", {}).get("value", "N/A")
-        ptype  = attrs.get("property_type", {}).get("value", "N/A")
-
-        listings.append({
-            "listing_id":    listing_id,
-            "title":         title,
-            "price":         price,
-            "location":      region,
-            "state":         state_name,
-            "beds":          beds,
-            "baths":         baths,
-            "size_sqft":     size,
-            "property_type": ptype,
-            "url":           link,
-            "scraped_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
-
-    return listings
+    return results
 
 
 # ── Scrape all pages ──────────────────────────────────────────────────────────
 def scrape_all() -> list[dict]:
     all_listings = []
     for page in range(1, MAX_PAGES + 1):
-        print(f"  📄 Page {page} …")
+        print(f"\n  📄 Page {page}/{MAX_PAGES}")
         try:
             items = fetch_page(page)
-            print(f"     → {len(items)} listings")
+            if not items:
+                print(f"     ⚠️  Empty page — stopping early at page {page}")
+                break
             all_listings.extend(items)
+            print(f"     Running total: {len(all_listings)}")
         except Exception as e:
-            print(f"     ❌ Error: {e}")
+            print(f"     ❌ Error on page {page}: {e}")
+            break
         time.sleep(SLEEP_BETWEEN)
     return all_listings
 
@@ -202,31 +198,33 @@ def save_csv(filepath: str, rows: list, mode: str = "w"):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    print(f"\n🏠 Mudah Property Scraper — {TODAY}")
-    print("=" * 45)
+    print(f"\n🏠 Mudah Penang Property Scraper — {TODAY}")
+    print("=" * 50)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     existing_ids = load_existing_ids(MASTER_FILE)
-    print(f"\n📂 Known listings in master file: {len(existing_ids)}")
+    print(f"\n📂 Known listings in master: {len(existing_ids)}")
 
-    print(f"\n🌐 Scraping up to {MAX_PAGES} pages …")
+    print(f"\n🌐 Scraping up to {MAX_PAGES} pages of Penang listings …")
     listings = scrape_all()
-    print(f"\n📦 Total scraped this run: {len(listings)}")
+    print(f"\n📦 Total scraped: {len(listings)}")
 
     new_listings = [
         l for l in listings
         if l["listing_id"] not in existing_ids and l["listing_id"] != "N/A"
     ]
-    print(f"✨ New (not seen before): {len(new_listings)}")
+    print(f"✨ New listings: {len(new_listings)}")
 
     if new_listings:
         save_csv(OUTPUT_FILE, new_listings, mode="w")
-        print(f"💾 Daily file  → {OUTPUT_FILE}")
+        print(f"\n💾 Daily file  → {OUTPUT_FILE}")
         save_csv(MASTER_FILE, new_listings, mode="a")
         print(f"💾 Master file → {MASTER_FILE}")
     else:
-        print("ℹ️  No new listings today.")
+        print("\nℹ️  No new listings today.")
+        # Still write an empty daily file so the commit step has something
+        save_csv(OUTPUT_FILE, [], mode="w")
 
     print("\n✅ Done!\n")
 
