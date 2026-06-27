@@ -18,8 +18,8 @@ HEADERS = {
 
 BASE_URL      = "https://www.mudah.my/penang/properties-for-sale"
 MAX_PAGES     = 50
-SLEEP_BETWEEN = 5      # 5s between pages
-RETRY_WAIT    = 60     # 60s wait on 429
+SLEEP_BETWEEN = 5
+RETRY_WAIT    = 60
 
 OUTPUT_DIR  = "data"
 TODAY       = datetime.now().strftime("%Y-%m-%d")
@@ -29,7 +29,7 @@ MASTER_FILE = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
 CSV_FIELDS = [
     "listing_id", "title", "price", "location", "state",
     "beds", "baths", "size_sqft", "property_type", "title_type",
-    "url", "scraped_at",
+    "phone", "url", "scraped_at",
 ]
 
 
@@ -40,7 +40,6 @@ def page_url(page):
 
 
 def fetch_with_retry(url, retries=3):
-    """Fetch a URL, retrying up to `retries` times on 429."""
     for attempt in range(1, retries + 1):
         resp = requests.get(url, headers=HEADERS, timeout=20)
         print(f"     HTTP {resp.status_code} | {len(resp.text)} chars")
@@ -62,10 +61,9 @@ def fetch_with_retry(url, retries=3):
 def fetch_page(page):
     url = page_url(page)
     print(f"  🌐 {url}")
-
     resp = fetch_with_retry(url)
     if resp is None:
-        return None   # None = stop scraping entirely
+        return None
 
     match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', resp.text, re.DOTALL)
     if not match:
@@ -85,6 +83,11 @@ def parse_ads(ads):
     for ad in ads:
         try:
             a = ad.get("attributes", {})
+
+            # Phone — hidden listings show None
+            phone_raw = a.get("phone")
+            phone = str(phone_raw) if phone_raw and not a.get("phoneHidden") else "N/A"
+
             results.append({
                 "listing_id":    str(ad.get("id") or a.get("listId", "N/A")),
                 "title":         a.get("subject", "N/A"),
@@ -96,6 +99,7 @@ def parse_ads(ads):
                 "size_sqft":     str(a.get("size", "N/A")),
                 "property_type": a.get("propertyTypeName", "N/A"),
                 "title_type":    a.get("titleTypeName", "N/A"),
+                "phone":         phone,
                 "url":           a.get("adviewUrl", f"https://www.mudah.my/ad/{ad.get('id')}.htm"),
                 "scraped_at":    now,
             })
@@ -141,9 +145,9 @@ def main():
                 print(f"     ⚠️  No listings — stopping at page {page}")
                 break
             all_listings.extend(items)
-            if page == 1:
+            if page == 1 and items:
                 s = items[0]
-                print(f"     📝 Sample: {s['title']} | {s['price']} | {s['beds']} bed | {s['size_sqft']} sqft | {s['location']}")
+                print(f"     📝 Sample: {s['title']} | {s['price']} | {s['beds']} bed | {s['size_sqft']} sqft | 📞 {s['phone']}")
             print(f"     ✅ Got {len(items)} | Total: {len(all_listings)}")
         except Exception as e:
             print(f"     ❌ Error: {e}")
