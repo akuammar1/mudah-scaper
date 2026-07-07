@@ -30,14 +30,14 @@ MASTER_FILE = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
 CSV_FIELDS = [
     "listing_id", "title", "price", "location", "state",
     "beds", "baths", "size_sqft", "property_type", "title_type",
-    "phone", "url", "scraped_at",
+    "seller_name", "phone", "url", "scraped_at",
 ]
 
 # Cleaned up — what appears in the daily output file
 OUTPUT_FIELDS = [
     "title", "price", "location",
     "beds", "baths", "size_sqft", "property_type", "title_type",
-    "phone", "url",
+    "seller_name", "phone", "url",
 ]
 
 
@@ -93,7 +93,12 @@ def parse_ads(ads):
             a = ad.get("attributes", {})
 
             phone_raw = a.get("phone")
-            phone = f"'{phone_raw}" if phone_raw and not a.get("phoneHidden") else "N/A"
+            if phone_raw and not a.get("phoneHidden"):
+                phone = f"'{phone_raw}"
+            elif phone_raw and a.get("phoneHidden"):
+                phone = "HIDDEN"
+            else:
+                phone = "CHAT ONLY"
 
             results.append({
                 "listing_id":    str(ad.get("id") or a.get("listId", "N/A")),
@@ -106,6 +111,7 @@ def parse_ads(ads):
                 "size_sqft":     str(a.get("size", "N/A")),
                 "property_type": a.get("propertyTypeName", "N/A"),
                 "title_type":    a.get("titleTypeName", "N/A"),
+                "seller_name":    a.get("nameLabel") or a.get("name", "N/A"),
                 "phone":         phone,
                 "url":           a.get("adviewUrl", f"https://www.mudah.my/ad/{ad.get('id')}.htm"),
                 "scraped_at":    now,
