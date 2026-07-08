@@ -16,7 +16,7 @@ jobs:
         run: pip install requests==2.32.3
       - name: Run scraper
         run: python scraper.py
-     - name: Generate outreach drafts
+      - name: Generate outreach drafts
         run: |
           TODAY=$(date +'%Y-%m-%d')
           python generate_drafts.py \
