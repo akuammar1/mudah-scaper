@@ -16,10 +16,11 @@ jobs:
         run: pip install requests==2.32.3
       - name: Run scraper
         run: python scraper.py
-      - name: Generate outreach drafts
+     - name: Generate outreach drafts
         run: |
+          TODAY=$(date +'%Y-%m-%d')
           python generate_drafts.py \
-            --csv data/mudah_penang_all.csv \
+            --csv "data/mudah_penang_${TODAY}.csv" \
             --out data/drafts.csv \
             --skip-drafted-log data/drafted_log.txt
       - name: Commit CSV results
