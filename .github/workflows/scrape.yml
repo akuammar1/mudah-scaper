@@ -1,28 +1,27 @@
 name: Mudah Property Scraper
-
 on:
   workflow_dispatch:
-
 jobs:
   scrape:
     name: Scrape & Save CSV
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
         run: pip install requests==2.32.3
-
       - name: Run scraper
         run: python scraper.py
-
+      - name: Generate outreach drafts
+        run: |
+          python generate_drafts.py \
+            --csv data/mudah_penang_all.csv \
+            --out data/drafts.csv \
+            --skip-drafted-log data/drafted_log.txt
       - name: Commit CSV results
         run: |
           git config user.name  "github-actions[bot]"
