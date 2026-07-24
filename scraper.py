@@ -21,19 +21,20 @@ MAX_PAGES     = 50
 SLEEP_BETWEEN = 5
 RETRY_WAIT    = 60
 
-OUTPUT_DIR  = "data"
-TODAY       = datetime.now().strftime("%Y-%m-%d")
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"mudah_penang_{TODAY}.csv")
-MASTER_FILE = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
+OUTPUT_DIR     = "data"
+BY_PRICE_DIR   = os.path.join(OUTPUT_DIR, "by_price_range")
+TODAY          = datetime.now().strftime("%Y-%m-%d")
+OUTPUT_FILE    = os.path.join(OUTPUT_DIR, f"mudah_penang_{TODAY}.csv")
+MASTER_FILE    = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
 
 # All fields — stored in master file (internal use)
 CSV_FIELDS = [
-    "listing_id", "title", "price", "location", "state",
+    "listing_id", "title", "price", "price_numeric", "price_range", "location", "state",
     "beds", "baths", "size_sqft", "property_type", "title_type",
     "seller_name", "phone", "url", "scraped_at",
 ]
 
-# Cleaned up — what appears in the daily output file
+# Cleaned up — what appears in daily/price-range output files
 OUTPUT_FIELDS = [
     "title", "price", "location",
     "beds", "baths", "size_sqft", "property_type", "title_type",
@@ -45,6 +46,21 @@ def page_url(page):
     if page == 1:
         return f"{BASE_URL}?adsby=false"
     return f"{BASE_URL}?adsby=false&o={page}"
+
+
+def price_bucket(price_numeric):
+    """Return a price range label like 'RM200k-300k' for a numeric price."""
+    if price_numeric is None or price_numeric <= 0:
+        return "Unknown"
+    if price_numeric >= 1_000_000:
+        # Group into RM1.0M-1.5M, RM1.5M-2.0M etc for high-end
+        lower = (price_numeric // 500_000) * 500_000
+        upper = lower + 500_000
+        return f"RM{lower/1_000_000:.1f}M-{upper/1_000_000:.1f}M"
+    else:
+        lower = (price_numeric // 100_000) * 100_000
+        upper = lower + 100_000
+        return f"RM{int(lower/1000)}k-{int(upper/1000)}k"
 
 
 def fetch_with_retry(url, retries=3):
@@ -100,10 +116,18 @@ def parse_ads(ads):
             else:
                 phone = "CHAT ONLY"
 
+            price_numeric = a.get("price")
+            try:
+                price_numeric = int(price_numeric)
+            except (TypeError, ValueError):
+                price_numeric = None
+
             results.append({
                 "listing_id":    str(ad.get("id") or a.get("listId", "N/A")),
                 "title":         a.get("subject", "N/A"),
                 "price":         a.get("priceLabel", str(a.get("price", "N/A"))),
+                "price_numeric": price_numeric if price_numeric is not None else "",
+                "price_range":   price_bucket(price_numeric),
                 "location":      a.get("locationLabel") or a.get("subareaName", "N/A"),
                 "state":         a.get("regionName", "Penang"),
                 "beds":          str(a.get("roomsName", "N/A")),
@@ -111,7 +135,7 @@ def parse_ads(ads):
                 "size_sqft":     str(a.get("size", "N/A")),
                 "property_type": a.get("propertyTypeName", "N/A"),
                 "title_type":    a.get("titleTypeName", "N/A"),
-                "seller_name":    a.get("nameLabel") or a.get("name", "N/A"),
+                "seller_name":   a.get("nameLabel") or a.get("name", "N/A"),
                 "phone":         phone,
                 "url":           a.get("adviewUrl", f"https://www.mudah.my/ad/{ad.get('id')}.htm"),
                 "scraped_at":    now,
@@ -129,6 +153,13 @@ def load_existing_ids(filepath):
         return {row["listing_id"] for row in csv.DictReader(f) if row.get("listing_id")}
 
 
+def load_all_rows(filepath):
+    if not os.path.exists(filepath):
+        return []
+    with open(filepath, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
 def save_csv(filepath, rows, fields, mode="w"):
     write_header = mode == "w" or not os.path.exists(filepath)
     with open(filepath, mode, newline="", encoding="utf-8") as f:
@@ -136,6 +167,24 @@ def save_csv(filepath, rows, fields, mode="w"):
         if write_header:
             writer.writeheader()
         writer.writerows(rows)
+
+
+def write_price_range_files(all_rows):
+    """Split all master rows into separate CSVs per price range bucket."""
+    os.makedirs(BY_PRICE_DIR, exist_ok=True)
+
+    buckets = {}
+    for row in all_rows:
+        b = row.get("price_range", "Unknown")
+        buckets.setdefault(b, []).append(row)
+
+    print(f"\n📊 Price range breakdown:")
+    for bucket_name in sorted(buckets.keys()):
+        rows = buckets[bucket_name]
+        safe_name = bucket_name.replace(".", "_")
+        filepath = os.path.join(BY_PRICE_DIR, f"{safe_name}.csv")
+        save_csv(filepath, rows, fields=OUTPUT_FIELDS, mode="w")
+        print(f"   {bucket_name:20s} → {len(rows):4d} listings  ({filepath})")
 
 
 def main():
@@ -160,7 +209,7 @@ def main():
             all_listings.extend(items)
             if page == 1 and items:
                 s = items[0]
-                print(f"     📝 Sample: {s['title']} | {s['price']} | {s['beds']} bed | {s['size_sqft']} sqft | 📞 {s['phone']}")
+                print(f"     📝 Sample: {s['title']} | {s['price']} ({s['price_range']}) | {s['beds']} bed | 📞 {s['phone']}")
             print(f"     ✅ Got {len(items)} | Total: {len(all_listings)}")
         except Exception as e:
             print(f"     ❌ Error: {e}")
@@ -171,18 +220,18 @@ def main():
     print(f"\n📦 Scraped: {len(all_listings)} | New: {len(new)}")
 
     if new:
-        # Daily output — clean columns only
         save_csv(OUTPUT_FILE, new, fields=OUTPUT_FIELDS, mode="w")
-        # Master — all columns including listing_id, state, scraped_at
         save_csv(MASTER_FILE, new, fields=CSV_FIELDS, mode="a")
         print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows)")
         print(f"💾 Master → {MASTER_FILE}")
-    elif all_listings:
-        print("ℹ️  All listings already in master — nothing new.")
-        save_csv(OUTPUT_FILE, [], fields=OUTPUT_FIELDS, mode="w")
     else:
         save_csv(OUTPUT_FILE, [], fields=OUTPUT_FIELDS, mode="w")
-        print("ℹ️  No listings scraped.")
+        print("ℹ️  No new listings today.")
+
+    # Rebuild price-range files from the FULL master (so it reflects all-time data)
+    all_master_rows = load_all_rows(MASTER_FILE)
+    if all_master_rows:
+        write_price_range_files(all_master_rows)
 
     print("\n✅ Done!\n")
 
