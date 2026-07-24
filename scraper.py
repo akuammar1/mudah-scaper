@@ -22,7 +22,6 @@ SLEEP_BETWEEN = 5
 RETRY_WAIT    = 60
 
 OUTPUT_DIR     = "data"
-BY_PRICE_DIR   = os.path.join(OUTPUT_DIR, "by_price_range")
 TODAY          = datetime.now().strftime("%Y-%m-%d")
 OUTPUT_FILE    = os.path.join(OUTPUT_DIR, f"mudah_penang_{TODAY}.csv")
 MASTER_FILE    = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
@@ -169,22 +168,15 @@ def save_csv(filepath, rows, fields, mode="w"):
         writer.writerows(rows)
 
 
-def write_price_range_files(all_rows):
-    """Split all master rows into separate CSVs per price range bucket."""
-    os.makedirs(BY_PRICE_DIR, exist_ok=True)
-
-    buckets = {}
-    for row in all_rows:
-        b = row.get("price_range", "Unknown")
-        buckets.setdefault(b, []).append(row)
-
-    print(f"\n📊 Price range breakdown:")
-    for bucket_name in sorted(buckets.keys()):
-        rows = buckets[bucket_name]
-        safe_name = bucket_name.replace(".", "_")
-        filepath = os.path.join(BY_PRICE_DIR, f"{safe_name}.csv")
-        save_csv(filepath, rows, fields=OUTPUT_FIELDS, mode="w")
-        print(f"   {bucket_name:20s} → {len(rows):4d} listings  ({filepath})")
+def sort_by_price(rows):
+    """Sort listings by price ascending — RM100k first, RM1M+ last. Unknown prices go last."""
+    def sort_key(row):
+        p = row.get("price_numeric", "")
+        try:
+            return (0, int(p))
+        except (ValueError, TypeError):
+            return (1, 0)   # unknown/blank prices sorted to the end
+    return sorted(rows, key=sort_key)
 
 
 def main():
@@ -220,18 +212,14 @@ def main():
     print(f"\n📦 Scraped: {len(all_listings)} | New: {len(new)}")
 
     if new:
-        save_csv(OUTPUT_FILE, new, fields=OUTPUT_FIELDS, mode="w")
-        save_csv(MASTER_FILE, new, fields=CSV_FIELDS, mode="a")
-        print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows)")
+        sorted_new = sort_by_price(new)
+        save_csv(OUTPUT_FILE, sorted_new, fields=OUTPUT_FIELDS, mode="w")
+        save_csv(MASTER_FILE, new, fields=CSV_FIELDS, mode="a")   # master keeps scrape order
+        print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows, sorted RM100k → highest)")
         print(f"💾 Master → {MASTER_FILE}")
     else:
         save_csv(OUTPUT_FILE, [], fields=OUTPUT_FIELDS, mode="w")
         print("ℹ️  No new listings today.")
-
-    # Rebuild price-range files from the FULL master (so it reflects all-time data)
-    all_master_rows = load_all_rows(MASTER_FILE)
-    if all_master_rows:
-        write_price_range_files(all_master_rows)
 
     print("\n✅ Done!\n")
 
