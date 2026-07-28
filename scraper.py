@@ -30,15 +30,17 @@ MASTER_FILE    = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
 CSV_FIELDS = [
     "listing_id", "title", "price", "price_numeric", "price_range", "location", "state",
     "beds", "baths", "size_sqft", "property_type", "title_type",
-    "seller_name", "phone", "url", "scraped_at",
+    "seller_name", "seller_type", "phone", "url", "scraped_at",
 ]
 
 # Cleaned up — what appears in daily/price-range output files
 OUTPUT_FIELDS = [
-    "title", "price", "location",
+    "title", "price", "highest_mv", "location",
     "beds", "baths", "size_sqft", "property_type", "title_type",
-    "seller_name", "phone", "url",
+    "seller_name", "seller_type", "phone", "url",
 ]
+
+SQFT_TOLERANCE = 0.20   # ±20% size range counts as "comparable"
 
 
 def page_url(page):
@@ -121,6 +123,9 @@ def parse_ads(ads):
             except (TypeError, ValueError):
                 price_numeric = None
 
+            # Detect if listed by an Agent/Company vs Private individual seller
+            seller_type = "Agent" if a.get("companyAd") else "Private"
+
             results.append({
                 "listing_id":    str(ad.get("id") or a.get("listId", "N/A")),
                 "title":         a.get("subject", "N/A"),
@@ -135,6 +140,7 @@ def parse_ads(ads):
                 "property_type": a.get("propertyTypeName", "N/A"),
                 "title_type":    a.get("titleTypeName", "N/A"),
                 "seller_name":   a.get("nameLabel") or a.get("name", "N/A"),
+                "seller_type":   seller_type,
                 "phone":         phone,
                 "url":           a.get("adviewUrl", f"https://www.mudah.my/ad/{ad.get('id')}.htm"),
                 "scraped_at":    now,
@@ -166,6 +172,58 @@ def save_csv(filepath, rows, fields, mode="w"):
         if write_header:
             writer.writeheader()
         writer.writerows(rows)
+
+
+def _safe_float(v):
+    try:
+        return float(str(v).replace(",", ""))
+    except (ValueError, TypeError):
+        return None
+
+
+def build_comparable_pool(all_rows):
+    """Pre-parse location/sqft/price/seller_type once for fast comparison lookups."""
+    pool = []
+    for r in all_rows:
+        sqft = _safe_float(r.get("size_sqft"))
+        price = _safe_float(r.get("price_numeric"))
+        loc = (r.get("location") or "").strip().lower()
+        seller_type = r.get("seller_type", "Private")
+        if sqft and price and loc:
+            pool.append({"location": loc, "sqft": sqft, "price": price, "seller_type": seller_type})
+    return pool
+
+
+def compute_market_value(row, pool):
+    """
+    Highest Market Value — the most expensive comparable listing
+    (same location, similar sqft) that was posted by an AGENT.
+    Agents tend to price closer to true market value than private sellers.
+    Falls back to highest among ALL comparables if no agent listings exist nearby.
+    """
+    sqft = _safe_float(row.get("size_sqft"))
+    loc = (row.get("location") or "").strip().lower()
+    if not sqft or not loc:
+        return "N/A"
+
+    low_bound = sqft * (1 - SQFT_TOLERANCE)
+    high_bound = sqft * (1 + SQFT_TOLERANCE)
+
+    comps = [
+        p for p in pool
+        if p["location"] == loc and low_bound <= p["sqft"] <= high_bound
+    ]
+
+    if not comps:
+        return "Insufficient data"
+
+    agent_comps = [c["price"] for c in comps if c["seller_type"] == "Agent"]
+    if agent_comps:
+        highest = max(agent_comps)
+        return f"RM{int(highest):,}"
+    else:
+        highest = max(c["price"] for c in comps)   # fallback: no agent listings nearby
+        return f"RM{int(highest):,} (no agent comps)"
 
 
 def sort_by_price(rows):
@@ -212,11 +270,21 @@ def main():
     print(f"\n📦 Scraped: {len(all_listings)} | New: {len(new)}")
 
     if new:
+        # Append to master FIRST so the comparable pool includes today's listings too
+        save_csv(MASTER_FILE, new, fields=CSV_FIELDS, mode="a")
+        print(f"💾 Master → {MASTER_FILE}")
+
+        # Build comparable pool from the full master (all-time data)
+        all_master_rows = load_all_rows(MASTER_FILE)
+        pool = build_comparable_pool(all_master_rows)
+        print(f"📊 Comparable pool size: {len(pool)} listings with valid price+sqft+location")
+
+        for row in new:
+            row["highest_mv"] = compute_market_value(row, pool)
+
         sorted_new = sort_by_price(new)
         save_csv(OUTPUT_FILE, sorted_new, fields=OUTPUT_FIELDS, mode="w")
-        save_csv(MASTER_FILE, new, fields=CSV_FIELDS, mode="a")   # master keeps scrape order
-        print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows, sorted RM100k → highest)")
-        print(f"💾 Master → {MASTER_FILE}")
+        print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows, sorted RM100k → highest, with Market Value)")
     else:
         save_csv(OUTPUT_FILE, [], fields=OUTPUT_FIELDS, mode="w")
         print("ℹ️  No new listings today.")
