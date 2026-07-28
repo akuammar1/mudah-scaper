@@ -223,7 +223,7 @@ def compute_market_value(row, pool):
         return f"RM{int(highest):,}"
     else:
         highest = max(c["price"] for c in comps)   # fallback: no agent listings nearby
-        return f"RM{int(highest):,} (no agent comps)"
+        return f"RM{int(highest):,}"
 
 
 def sort_by_price(rows):
