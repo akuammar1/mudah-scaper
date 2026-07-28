@@ -41,6 +41,7 @@ OUTPUT_FIELDS = [
 ]
 
 SQFT_TOLERANCE = 0.20   # ±20% size range counts as "comparable"
+MIN_COMPARABLES = 2     # need at least this many similar listings to compute a market value
 
 
 def page_url(page):
