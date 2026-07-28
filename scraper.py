@@ -196,10 +196,8 @@ def build_comparable_pool(all_rows):
 
 def compute_market_value(row, pool):
     """
-    Highest Market Value — the most expensive comparable listing
-    (same location, similar sqft) that was posted by an AGENT.
-    Agents tend to price closer to true market value than private sellers.
-    Falls back to highest among ALL comparables if no agent listings exist nearby.
+    Market Value — lowest to highest price among comparable listings
+    (same location, similar sqft), regardless of seller type.
     """
     sqft = _safe_float(row.get("size_sqft"))
     loc = (row.get("location") or "").strip().lower()
@@ -210,20 +208,16 @@ def compute_market_value(row, pool):
     high_bound = sqft * (1 + SQFT_TOLERANCE)
 
     comps = [
-        p for p in pool
+        p["price"] for p in pool
         if p["location"] == loc and low_bound <= p["sqft"] <= high_bound
     ]
 
-    if not comps:
+    if len(comps) < MIN_COMPARABLES:
         return "Insufficient data"
 
-    agent_comps = [c["price"] for c in comps if c["seller_type"] == "Agent"]
-    if agent_comps:
-        highest = max(agent_comps)
-        return f"RM{int(highest):,}"
-    else:
-        highest = max(c["price"] for c in comps)   # fallback: no agent listings nearby
-        return f"RM{int(highest):,}"
+    lowest = min(comps)
+    highest = max(comps)
+    return f"RM{int(lowest):,} - RM{int(highest):,}"
 
 
 def sort_by_price(rows):
@@ -234,6 +228,18 @@ def sort_by_price(rows):
             return (0, int(p))
         except (ValueError, TypeError):
             return (1, 0)   # unknown/blank prices sorted to the end
+    return sorted(rows, key=sort_key)
+
+
+def sort_by_market_value(rows):
+    """Sort listings by Market Value ascending (lowest RM first). Rows with
+    'Insufficient data' or 'N/A' (no MV computed) are sorted to the end."""
+    def sort_key(row):
+        mv = row.get("highest_mv", "")
+        match = re.match(r"RM([\d,]+)", mv)
+        if match:
+            return (0, int(match.group(1).replace(",", "")))
+        return (1, 0)
     return sorted(rows, key=sort_key)
 
 
@@ -282,9 +288,9 @@ def main():
         for row in new:
             row["highest_mv"] = compute_market_value(row, pool)
 
-        sorted_new = sort_by_price(new)
+        sorted_new = sort_by_market_value(new)
         save_csv(OUTPUT_FILE, sorted_new, fields=OUTPUT_FIELDS, mode="w")
-        print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows, sorted RM100k → highest, with Market Value)")
+        print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows, sorted by Market Value: lowest → highest)")
     else:
         save_csv(OUTPUT_FILE, [], fields=OUTPUT_FIELDS, mode="w")
         print("ℹ️  No new listings today.")
