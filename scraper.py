@@ -40,7 +40,7 @@ OUTPUT_FIELDS = [
     "seller_name", "seller_type", "phone", "url",
 ]
 
-SQFT_TOLERANCE = 0.20   # ±20% size range counts as "comparable"
+SQFT_TOLERANCE = 0.30   # ±30% size range — widened since property_type filter now narrows pool
 MIN_COMPARABLES = 2     # need at least this many similar listings to compute a market value
 
 
@@ -183,41 +183,59 @@ def _safe_float(v):
 
 
 def build_comparable_pool(all_rows):
-    """Pre-parse location/sqft/price/seller_type once for fast comparison lookups."""
+    """Pre-parse location/sqft/price/property_type once for fast comparison lookups."""
     pool = []
     for r in all_rows:
         sqft = _safe_float(r.get("size_sqft"))
         price = _safe_float(r.get("price_numeric"))
         loc = (r.get("location") or "").strip().lower()
-        seller_type = r.get("seller_type", "Private")
-        if sqft and price and loc:
-            pool.append({"location": loc, "sqft": sqft, "price": price, "seller_type": seller_type})
+        ptype = (r.get("property_type") or "").strip().lower()
+        if sqft and price and loc and ptype:
+            pool.append({"location": loc, "sqft": sqft, "price": price, "property_type": ptype})
     return pool
+
+
+def _percentile(sorted_vals, pct):
+    """Linear-interpolated percentile. pct is 0.0–1.0."""
+    if not sorted_vals:
+        return None
+    idx = (len(sorted_vals) - 1) * pct
+    lo = int(idx)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    frac = idx - lo
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
 
 
 def compute_market_value(row, pool):
     """
-    Market Value — lowest to highest price among comparable listings
-    (same location, similar sqft), regardless of seller type.
+    Market Value — 10th to 90th percentile price among comparable listings:
+    same property_type + same location + similar sqft (±SQFT_TOLERANCE).
+    Percentile (not raw min/max) trims outliers like fire-sales or overpriced
+    renovated units, so the range stays realistic instead of super wide.
     """
     sqft = _safe_float(row.get("size_sqft"))
     loc = (row.get("location") or "").strip().lower()
-    if not sqft or not loc:
+    ptype = (row.get("property_type") or "").strip().lower()
+    if not sqft or not loc or not ptype:
         return "N/A"
 
     low_bound = sqft * (1 - SQFT_TOLERANCE)
     high_bound = sqft * (1 + SQFT_TOLERANCE)
 
-    comps = [
+    comps = sorted(
         p["price"] for p in pool
-        if p["location"] == loc and low_bound <= p["sqft"] <= high_bound
-    ]
+        if p["location"] == loc
+        and p["property_type"] == ptype
+        and low_bound <= p["sqft"] <= high_bound
+    )
 
     if len(comps) < MIN_COMPARABLES:
         return "Insufficient data"
 
-    lowest = min(comps)
-    highest = max(comps)
+    # Small samples: percentile trimming barely differs from min/max anyway,
+    # so this stays accurate even with only 2-3 comps.
+    lowest = _percentile(comps, 0.10)
+    highest = _percentile(comps, 0.90)
     return f"RM{int(lowest):,} - RM{int(highest):,}"
 
 
