@@ -30,14 +30,14 @@ MASTER_FILE    = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
 CSV_FIELDS = [
     "listing_id", "title", "price", "price_numeric", "price_range", "location", "state",
     "beds", "baths", "size_sqft", "property_type", "title_type",
-    "seller_name", "seller_type", "phone", "url", "scraped_at",
+    "seller_name",  "phone", "url", "scraped_at",
 ]
 
 # Cleaned up — what appears in daily/price-range output files
 OUTPUT_FIELDS = [
     "title", "price", "highest_mv", "location",
     "beds", "baths", "size_sqft", "property_type", "title_type",
-    "seller_name", "seller_type", "phone", "url",
+    "seller_name",  "phone", "url",
 ]
 
 SQFT_TOLERANCE = 0.30   # ±30% size range — widened since property_type filter now narrows pool
