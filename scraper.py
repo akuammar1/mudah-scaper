@@ -16,34 +16,34 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+# ── Config ───────────────────────────────────────────────────────────────────
 BASE_URL      = "https://www.mudah.my/penang/properties-for-sale"
-MAX_PAGES     = 50
-SLEEP_BETWEEN = 5
-RETRY_WAIT    = 60
+MAX_PAGES     = 50     # stops automatically when a page comes back empty
+SLEEP_BETWEEN = 5      # seconds between pages
+RETRY_WAIT    = 60     # seconds to wait after a 429 (rate limit)
 
-OUTPUT_DIR     = "data"
-TODAY          = datetime.now().strftime("%Y-%m-%d")
-OUTPUT_FILE    = os.path.join(OUTPUT_DIR, f"mudah_penang_{TODAY}.csv")
-MASTER_FILE    = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
+OUTPUT_DIR  = "data"
+TODAY       = datetime.now().strftime("%Y-%m-%d")
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"mudah_penang_{TODAY}.csv")
+MASTER_FILE = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
 
-# All fields — stored in master file (internal use)
+# Master file keeps everything (internal use)
 CSV_FIELDS = [
-    "listing_id", "title", "price", "price_numeric", "price_range", "location", "state",
-    "beds", "baths", "size_sqft", "property_type", "title_type",
-    "seller_name",  "phone", "url", "scraped_at",
+    "listing_id", "title", "price", "price_numeric", "price_range",
+    "location", "state", "beds", "baths", "size_sqft",
+    "property_type", "title_type", "seller_name", "phone",
+    "url", "scraped_at",
 ]
 
-# Cleaned up — what appears in daily/price-range output files
+# Daily output file: clean columns only
 OUTPUT_FIELDS = [
-    "title", "price", "highest_mv", "location",
+    "title", "price", "location",
     "beds", "baths", "size_sqft", "property_type", "title_type",
-    "seller_name",  "phone", "url",
+    "seller_name", "phone", "url",
 ]
 
-SQFT_TOLERANCE = 0.30   # ±30% size range — widened since property_type filter now narrows pool
-MIN_COMPARABLES = 2     # need at least this many similar listings to compute a market value
 
-
+# ── Helpers ──────────────────────────────────────────────────────────────────
 def page_url(page):
     if page == 1:
         return f"{BASE_URL}?adsby=false"
@@ -51,29 +51,38 @@ def page_url(page):
 
 
 def price_bucket(price_numeric):
-    """Return a price range label like 'RM200k-300k' for a numeric price."""
+    """Label like 'RM300k-400k' (RM100k steps) or 'RM1.5M-2.0M' (RM500k steps above 1M)."""
     if price_numeric is None or price_numeric <= 0:
         return "Unknown"
     if price_numeric >= 1_000_000:
-        # Group into RM1.0M-1.5M, RM1.5M-2.0M etc for high-end
         lower = (price_numeric // 500_000) * 500_000
         upper = lower + 500_000
-        return f"RM{lower/1_000_000:.1f}M-{upper/1_000_000:.1f}M"
-    else:
-        lower = (price_numeric // 100_000) * 100_000
-        upper = lower + 100_000
-        return f"RM{int(lower/1000)}k-{int(upper/1000)}k"
+        return f"RM{lower / 1_000_000:.1f}M-{upper / 1_000_000:.1f}M"
+    lower = (price_numeric // 100_000) * 100_000
+    upper = lower + 100_000
+    return f"RM{int(lower / 1000)}k-{int(upper / 1000)}k"
 
 
+def sort_by_price(rows):
+    """Cheapest first. Unknown prices go to the bottom."""
+    def key(row):
+        try:
+            return (0, int(row.get("price_numeric", "")))
+        except (ValueError, TypeError):
+            return (1, 0)
+    return sorted(rows, key=key)
+
+
+# ── Fetching ─────────────────────────────────────────────────────────────────
 def fetch_with_retry(url, retries=3):
     for attempt in range(1, retries + 1):
         resp = requests.get(url, headers=HEADERS, timeout=20)
         print(f"     HTTP {resp.status_code} | {len(resp.text)} chars")
         if resp.status_code == 200:
             return resp
-        elif resp.status_code == 429:
+        if resp.status_code == 429:
             if attempt < retries:
-                print(f"     ⏳ Rate limited (attempt {attempt}/{retries}) — waiting {RETRY_WAIT}s...")
+                print(f"     ⏳ Rate limited ({attempt}/{retries}) — waiting {RETRY_WAIT}s...")
                 time.sleep(RETRY_WAIT)
             else:
                 print(f"     🛑 Rate limited {retries} times — giving up")
@@ -89,7 +98,7 @@ def fetch_page(page):
     print(f"  🌐 {url}")
     resp = fetch_with_retry(url)
     if resp is None:
-        return None
+        return None   # None = stop scraping
 
     match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', resp.text, re.DOTALL)
     if not match:
@@ -110,22 +119,19 @@ def parse_ads(ads):
         try:
             a = ad.get("attributes", {})
 
+            # Phone: 3 cases
             phone_raw = a.get("phone")
             if phone_raw and not a.get("phoneHidden"):
-                phone = f"'{phone_raw}"
+                phone = f"'{phone_raw}"      # ' keeps the leading 0 in Excel
             elif phone_raw and a.get("phoneHidden"):
                 phone = "HIDDEN"
             else:
                 phone = "CHAT ONLY"
 
-            price_numeric = a.get("price")
             try:
-                price_numeric = int(price_numeric)
+                price_numeric = int(a.get("price"))
             except (TypeError, ValueError):
                 price_numeric = None
-
-            # Detect if listed by an Agent/Company vs Private individual seller
-            seller_type = "Agent" if a.get("companyAd") else "Private"
 
             results.append({
                 "listing_id":    str(ad.get("id") or a.get("listId", "N/A")),
@@ -141,7 +147,6 @@ def parse_ads(ads):
                 "property_type": a.get("propertyTypeName", "N/A"),
                 "title_type":    a.get("titleTypeName", "N/A"),
                 "seller_name":   a.get("nameLabel") or a.get("name", "N/A"),
-                "seller_type":   seller_type,
                 "phone":         phone,
                 "url":           a.get("adviewUrl", f"https://www.mudah.my/ad/{ad.get('id')}.htm"),
                 "scraped_at":    now,
@@ -152,18 +157,12 @@ def parse_ads(ads):
     return results
 
 
+# ── CSV ──────────────────────────────────────────────────────────────────────
 def load_existing_ids(filepath):
     if not os.path.exists(filepath):
         return set()
     with open(filepath, newline="", encoding="utf-8") as f:
         return {row["listing_id"] for row in csv.DictReader(f) if row.get("listing_id")}
-
-
-def load_all_rows(filepath):
-    if not os.path.exists(filepath):
-        return []
-    with open(filepath, newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
 
 
 def save_csv(filepath, rows, fields, mode="w"):
@@ -175,93 +174,7 @@ def save_csv(filepath, rows, fields, mode="w"):
         writer.writerows(rows)
 
 
-def _safe_float(v):
-    try:
-        return float(str(v).replace(",", ""))
-    except (ValueError, TypeError):
-        return None
-
-
-def build_comparable_pool(all_rows):
-    """Pre-parse location/sqft/price/property_type once for fast comparison lookups."""
-    pool = []
-    for r in all_rows:
-        sqft = _safe_float(r.get("size_sqft"))
-        price = _safe_float(r.get("price_numeric"))
-        loc = (r.get("location") or "").strip().lower()
-        ptype = (r.get("property_type") or "").strip().lower()
-        if sqft and price and loc and ptype:
-            pool.append({"location": loc, "sqft": sqft, "price": price, "property_type": ptype})
-    return pool
-
-
-def _percentile(sorted_vals, pct):
-    """Linear-interpolated percentile. pct is 0.0–1.0."""
-    if not sorted_vals:
-        return None
-    idx = (len(sorted_vals) - 1) * pct
-    lo = int(idx)
-    hi = min(lo + 1, len(sorted_vals) - 1)
-    frac = idx - lo
-    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac
-
-
-def compute_market_value(row, pool):
-    """
-    Market Value — 10th to 90th percentile price among comparable listings:
-    same property_type + same location + similar sqft (±SQFT_TOLERANCE).
-    Percentile (not raw min/max) trims outliers like fire-sales or overpriced
-    renovated units, so the range stays realistic instead of super wide.
-    """
-    sqft = _safe_float(row.get("size_sqft"))
-    loc = (row.get("location") or "").strip().lower()
-    ptype = (row.get("property_type") or "").strip().lower()
-    if not sqft or not loc or not ptype:
-        return "N/A"
-
-    low_bound = sqft * (1 - SQFT_TOLERANCE)
-    high_bound = sqft * (1 + SQFT_TOLERANCE)
-
-    comps = sorted(
-        p["price"] for p in pool
-        if p["location"] == loc
-        and p["property_type"] == ptype
-        and low_bound <= p["sqft"] <= high_bound
-    )
-
-    if len(comps) < MIN_COMPARABLES:
-        return "Insufficient data"
-
-    # Small samples: percentile trimming barely differs from min/max anyway,
-    # so this stays accurate even with only 2-3 comps.
-    lowest = _percentile(comps, 0.10)
-    highest = _percentile(comps, 0.90)
-    return f"RM{int(lowest):,} - RM{int(highest):,}"
-
-
-def sort_by_price(rows):
-    """Sort listings by price ascending — RM100k first, RM1M+ last. Unknown prices go last."""
-    def sort_key(row):
-        p = row.get("price_numeric", "")
-        try:
-            return (0, int(p))
-        except (ValueError, TypeError):
-            return (1, 0)   # unknown/blank prices sorted to the end
-    return sorted(rows, key=sort_key)
-
-
-def sort_by_market_value(rows):
-    """Sort listings by Market Value ascending (lowest RM first). Rows with
-    'Insufficient data' or 'N/A' (no MV computed) are sorted to the end."""
-    def sort_key(row):
-        mv = row.get("highest_mv", "")
-        match = re.match(r"RM([\d,]+)", mv)
-        if match:
-            return (0, int(match.group(1).replace(",", "")))
-        return (1, 0)
-    return sorted(rows, key=sort_key)
-
-
+# ── Main ─────────────────────────────────────────────────────────────────────
 def main():
     print(f"\n🏠 Mudah Penang Property Scraper — {TODAY}")
     print("=" * 50)
@@ -282,9 +195,9 @@ def main():
                 print(f"     ⚠️  No listings — stopping at page {page}")
                 break
             all_listings.extend(items)
-            if page == 1 and items:
+            if page == 1:
                 s = items[0]
-                print(f"     📝 Sample: {s['title']} | {s['price']} ({s['price_range']}) | {s['beds']} bed | 📞 {s['phone']}")
+                print(f"     📝 Sample: {s['title']} | {s['price']} ({s['price_range']}) | {s['beds']} bed | {s['seller_name']} | {s['phone']}")
             print(f"     ✅ Got {len(items)} | Total: {len(all_listings)}")
         except Exception as e:
             print(f"     ❌ Error: {e}")
@@ -295,24 +208,13 @@ def main():
     print(f"\n📦 Scraped: {len(all_listings)} | New: {len(new)}")
 
     if new:
-        # Append to master FIRST so the comparable pool includes today's listings too
+        save_csv(OUTPUT_FILE, sort_by_price(new), fields=OUTPUT_FIELDS, mode="w")
         save_csv(MASTER_FILE, new, fields=CSV_FIELDS, mode="a")
+        print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows, sorted cheapest → highest)")
         print(f"💾 Master → {MASTER_FILE}")
-
-        # Build comparable pool from the full master (all-time data)
-        all_master_rows = load_all_rows(MASTER_FILE)
-        pool = build_comparable_pool(all_master_rows)
-        print(f"📊 Comparable pool size: {len(pool)} listings with valid price+sqft+location")
-
-        for row in new:
-            row["highest_mv"] = compute_market_value(row, pool)
-
-        sorted_new = sort_by_market_value(new)
-        save_csv(OUTPUT_FILE, sorted_new, fields=OUTPUT_FIELDS, mode="w")
-        print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows, sorted by Market Value: lowest → highest)")
     else:
         save_csv(OUTPUT_FILE, [], fields=OUTPUT_FIELDS, mode="w")
-        print("ℹ️  No new listings today.")
+        print("ℹ️  No new listings.")
 
     print("\n✅ Done!\n")
 
