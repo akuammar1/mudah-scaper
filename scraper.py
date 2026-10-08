@@ -3,6 +3,7 @@ import json
 import re
 import csv
 import os
+import sys
 import time
 from datetime import datetime
 
@@ -93,6 +94,30 @@ def fetch_with_retry(url, retries=3):
     return None
 
 
+def looks_like_ad(item):
+    if not isinstance(item, dict):
+        return False
+    a = item.get("attributes") if isinstance(item.get("attributes"), dict) else item
+    return "subject" in a and ("listId" in a or "adviewUrl" in a or "priceLabel" in a)
+
+
+def find_ads(obj):
+    """Search the whole JSON tree for the list of ads, wherever Mudah put it."""
+    if isinstance(obj, list):
+        if obj and looks_like_ad(obj[0]):
+            return obj
+        for item in obj:
+            found = find_ads(item)
+            if found:
+                return found
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            found = find_ads(v)
+            if found:
+                return found
+    return None
+
+
 def fetch_page(page):
     url = page_url(page)
     print(f"  🌐 {url}")
@@ -102,11 +127,35 @@ def fetch_page(page):
 
     match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', resp.text, re.DOTALL)
     if not match:
-        print("     ❌ No __NEXT_DATA__ found")
+        print("     ❌ No __NEXT_DATA__ found. Page may be a block/captcha page or Mudah changed its framework.")
+        title = re.search(r"<title>(.*?)</title>", resp.text, re.DOTALL)
+        print(f"     🔎 Page title: {title.group(1).strip()[:100] if title else 'none'}")
+        print(f"     🔎 Snippet: {resp.text[:300]!r}")
         return []
 
     data = json.loads(match.group(1))
-    ads = data["props"]["pageProps"]["initialStore"].get("ads", [])
+
+    # Known path first, then search everywhere
+    ads = []
+    try:
+        ads = data["props"]["pageProps"]["initialStore"].get("ads", []) or []
+    except (KeyError, TypeError, AttributeError):
+        print("     ⚠️  Known path props.pageProps.initialStore.ads not found, searching whole JSON...")
+
+    if not ads:
+        ads = find_ads(data) or []
+        if ads:
+            print(f"     ✅ Found {len(ads)} ads via fallback search")
+
+    if not ads:
+        page_props = data.get("props", {}).get("pageProps", {})
+        print("     ❌ No ads found anywhere in the page JSON")
+        print(f"     🔎 pageProps keys: {list(page_props.keys())}")
+        store = page_props.get("initialStore")
+        if isinstance(store, dict):
+            print(f"     🔎 initialStore keys: {list(store.keys())}")
+        return []
+
     print(f"     📦 Raw ads in page: {len(ads)}")
     return parse_ads(ads)
 
@@ -117,7 +166,7 @@ def parse_ads(ads):
 
     for ad in ads:
         try:
-            a = ad.get("attributes", {})
+            a = ad.get("attributes") if isinstance(ad.get("attributes"), dict) else ad
 
             # Phone: 3 cases
             phone_raw = a.get("phone")
@@ -203,6 +252,10 @@ def main():
             print(f"     ❌ Error: {e}")
             break
         time.sleep(SLEEP_BETWEEN)
+
+    if not all_listings:
+        print("\n🛑 ZERO listings scraped. See the diagnostic lines above (HTTP status / page title / JSON keys).")
+        sys.exit(1)
 
     new = [l for l in all_listings if l["listing_id"] not in existing_ids and l["listing_id"] != "N/A"]
     print(f"\n📦 Scraped: {len(all_listings)} | New: {len(new)}")
