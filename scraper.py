@@ -102,7 +102,7 @@ def looks_like_ad(item):
 
 
 def find_ads(obj):
-    """Search the whole JSON tree for the list of ads, wherever Mudah put it."""
+    """Search a JSON tree for the list of ads, wherever it is."""
     if isinstance(obj, list):
         if obj and looks_like_ad(obj[0]):
             return obj
@@ -118,6 +118,92 @@ def find_ads(obj):
     return None
 
 
+DECODER = json.JSONDecoder()
+SCRIPT_RE = re.compile(r"<script([^>]*)>(.*?)</script>", re.DOTALL)
+
+
+def ads_from_json_scripts(html):
+    """Method 1: <script> tags holding JSON (__NEXT_DATA__ in any attribute order, or type=application/json)."""
+    for m in SCRIPT_RE.finditer(html):
+        attrs, body = m.group(1), m.group(2).strip()
+        if not body.startswith(("{", "[")):
+            continue
+        if "__NEXT_DATA__" in attrs or "application/json" in attrs:
+            try:
+                ads = find_ads(json.loads(body))
+            except ValueError:
+                continue
+            if ads:
+                return ads
+    return None
+
+
+def ads_from_window_state(html):
+    """Method 2: window.__SOMETHING__ = {...};"""
+    for m in re.finditer(r"window\.__[A-Za-z_]+__\s*=\s*", html):
+        try:
+            obj, _ = DECODER.raw_decode(html, m.end())
+        except ValueError:
+            continue
+        ads = find_ads(obj)
+        if ads:
+            return ads
+    return None
+
+
+def ads_from_stream_chunks(html):
+    """Method 3: Next.js streaming payload: self.__next_f.push([1,"...json..."])."""
+    chunks = []
+    for m in re.finditer(r"self\.__next_f\.push\(\[\d+,", html):
+        try:
+            obj, _ = DECODER.raw_decode(html, m.end())
+        except ValueError:
+            continue
+        if isinstance(obj, str):
+            chunks.append(obj)
+    return ads_from_text(" ".join(chunks)) if chunks else None
+
+
+def ads_from_text(text):
+    """Method 4: find any  "ads":[ ... ]  list inside raw text."""
+    for m in re.finditer(r'"ads"\s*:\s*\[', text):
+        try:
+            obj, _ = DECODER.raw_decode(text, m.end() - 1)
+        except ValueError:
+            continue
+        if isinstance(obj, list) and obj and looks_like_ad(obj[0]):
+            return obj
+    return None
+
+
+def extract_ads(html):
+    for name, fn in [
+        ("json <script> tag", ads_from_json_scripts),
+        ("window state", ads_from_window_state),
+        ("stream chunks", ads_from_stream_chunks),
+        ("raw text search", ads_from_text),
+    ]:
+        ads = fn(html)
+        if ads:
+            return ads, name
+    return None, None
+
+
+def print_diagnostics(html):
+    title = re.search(r"<title>(.*?)</title>", html, re.DOTALL)
+    print(f"     🔎 Page title: {title.group(1).strip()[:100] if title else 'none'}")
+    print(f"     🔎 HTML size: {len(html)} chars")
+    tokens = ["__NEXT_DATA__", "initialStore", "__next_f", "listId", "adviewUrl",
+              "priceLabel", "application/ld+json", "__INITIAL_STATE__", "window.__"]
+    print("     🔎 Token counts: " + ", ".join(f"{t}={html.count(t)}" for t in tokens))
+    shown = 0
+    for m in SCRIPT_RE.finditer(html):
+        attrs, body = m.group(1).strip(), m.group(2)
+        if ("id=" in attrs or "type=" in attrs) and shown < 12:
+            print(f"     🔎 script [{attrs[:80]}] size={len(body)}")
+            shown += 1
+
+
 def fetch_page(page):
     url = page_url(page)
     print(f"  🌐 {url}")
@@ -125,38 +211,13 @@ def fetch_page(page):
     if resp is None:
         return None   # None = stop scraping
 
-    match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', resp.text, re.DOTALL)
-    if not match:
-        print("     ❌ No __NEXT_DATA__ found. Page may be a block/captcha page or Mudah changed its framework.")
-        title = re.search(r"<title>(.*?)</title>", resp.text, re.DOTALL)
-        print(f"     🔎 Page title: {title.group(1).strip()[:100] if title else 'none'}")
-        print(f"     🔎 Snippet: {resp.text[:300]!r}")
+    ads, method = extract_ads(resp.text)
+    if not ads:
+        print("     ❌ Could not find ads in the page. Diagnostics:")
+        print_diagnostics(resp.text)
         return []
 
-    data = json.loads(match.group(1))
-
-    # Known path first, then search everywhere
-    ads = []
-    try:
-        ads = data["props"]["pageProps"]["initialStore"].get("ads", []) or []
-    except (KeyError, TypeError, AttributeError):
-        print("     ⚠️  Known path props.pageProps.initialStore.ads not found, searching whole JSON...")
-
-    if not ads:
-        ads = find_ads(data) or []
-        if ads:
-            print(f"     ✅ Found {len(ads)} ads via fallback search")
-
-    if not ads:
-        page_props = data.get("props", {}).get("pageProps", {})
-        print("     ❌ No ads found anywhere in the page JSON")
-        print(f"     🔎 pageProps keys: {list(page_props.keys())}")
-        store = page_props.get("initialStore")
-        if isinstance(store, dict):
-            print(f"     🔎 initialStore keys: {list(store.keys())}")
-        return []
-
-    print(f"     📦 Raw ads in page: {len(ads)}")
+    print(f"     ✅ Found {len(ads)} ads via: {method}")
     return parse_ads(ads)
 
 
