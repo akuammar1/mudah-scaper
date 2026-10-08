@@ -1,6 +1,10 @@
 name: Mudah Property Scraper
 
 on:
+  # Manual only: press "Run workflow" in the Actions tab.
+  # To auto-run daily at 10am MYT, add:
+  # schedule:
+  #   - cron: "0 2 * * *"
   workflow_dispatch:
 
 jobs:
