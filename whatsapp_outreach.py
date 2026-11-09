@@ -29,7 +29,7 @@ from datetime import date
 DAILY_CAP = None  # None = no limit; set a number (e.g. 9) to cap per day
 LOG_FILE = "contacted.csv"
 OUT_DIR = "outreach"
-AGENT = "Ammar from CCI Property (REN54406)"
+AGENT = "My name is Ammar Mirza Muazzam, a senior real estate agent from CCI Property, REN54406, under Muazzam Ali."
 MIN_PRICE = 50000  # skip listings priced below this (rentals, per-sqft, junk)
 SALUTATION = "Mr"  # set to "" to greet with the plain name instead
 
@@ -51,20 +51,17 @@ NOT_A_NAME = {
 }
 
 TEMPLATES = [
-    "{greet} I saw your ad on Mudah for {place}{price_part}. "
-    "{agent}. I have several buyers looking in this area right now and "
-    "your property caught their eye. Is it still available? "
-    "(Reply STOP and I won't message again.)",
+    "{greet} I saw your ads on Mudah, {place}.{price_part} {agent} "
+    "I have several buyers looking in this area right now and your "
+    "property caught their eye. Is it still available? Are you interested?",
 
-    "{greet} I came across your listing on Mudah, {place}{price_part}. "
-    "I'm {agent} and I currently have a few interested buyers for this kind "
-    "of property. Would you be open to a quick chat? "
-    "(Reply STOP and I won't message again.)",
+    "{greet} I saw your ads on Mudah, {place}.{price_part} {agent} "
+    "I currently have a few interested buyers for this kind of property. "
+    "Is it still available? Are you interested?",
 
-    "{greet} I noticed your Mudah ad for {place}{price_part}. "
-    "{agent} here. I've got buyers asking about properties in this area and "
-    "yours looks like a good match. Can I share how I can help? "
-    "(Reply STOP and I won't message again.)",
+    "{greet} I saw your ads on Mudah, {place}.{price_part} {agent} "
+    "I've got buyers asking about properties in this area and yours looks "
+    "like a good match. Is it still available? Are you interested?",
 ]
 
 
@@ -128,7 +125,7 @@ def build_message(lead):
         greet = "Hi,"
     place = lead["area"] or lead["title"] or "your property"
     price = fmt_price(lead["price"])
-    price_part = f" at {price}" if price else ""
+    price_part = f" Pricing at {price}." if price else ""
     return random.choice(TEMPLATES).format(
         greet=greet, place=place, price_part=price_part, agent=AGENT
     )
