@@ -1,7 +1,11 @@
 name: WhatsApp outreach
 
 on:
+concurrency:
+  group: outreach
+  cancel-in-progress: false
   workflow_dispatch:
+  
 
 permissions:
   contents: write
