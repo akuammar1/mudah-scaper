@@ -26,10 +26,11 @@ import urllib.parse
 import urllib.request
 from datetime import date
 
-DAILY_CAP = 9
+DAILY_CAP = None  # None = no limit; set a number (e.g. 9) to cap per day
 LOG_FILE = "contacted.csv"
 OUT_DIR = "outreach"
 AGENT = "Ammar from CCI Property (REN54406)"
+MIN_PRICE = 50000  # skip listings priced below this (rentals, per-sqft, junk)
 SALUTATION = "Mr"  # set to "" to greet with the plain name instead
 
 # Possible column names in your CSV (first match wins). Edit if yours differ.
@@ -96,6 +97,14 @@ def clean_name(raw):
     if any(w.lower().strip(".,") in NOT_A_NAME for w in words):
         return ""
     return words[0].title()
+
+
+def price_value(raw):
+    digits = re.sub(r"[^\d.]", "", (raw or "").replace(",", ""))
+    try:
+        return float(digits) if digits else None
+    except ValueError:
+        return None
 
 
 def fmt_price(raw):
@@ -165,6 +174,9 @@ def collect(files, ids, phones, need):
             for row in csv.DictReader(f):
                 phone = norm_phone(pick(row, "phone"))
                 lid = pick(row, "id") or (phone or "")
+                pv = price_value(pick(row, "price"))
+                if pv is not None and pv < MIN_PRICE:
+                    continue
                 if not phone or lid in ids or phone in phones or phone in seen:
                     continue
                 seen.add(phone)
@@ -214,21 +226,24 @@ def send_telegram(leads):
     if not token or not chat:
         print("Telegram not configured, skipping.")
         return
-    lines = [f"<b>{len(leads)} WhatsApp leads for {date.today()}</b>", ""]
+    items = []
     for i, l in enumerate(leads, 1):
         label = html.escape(clean_name(l["name"]) or "Seller")
         sub = html.escape(" | ".join(x for x in (l["area"] or l["title"], fmt_price(l["price"])) if x))
-        lines.append(f'{i}. <a href="{html.escape(l["link"])}">{label}</a> - {sub}')
-    data = json.dumps({
-        "chat_id": chat, "text": "\n".join(lines),
-        "parse_mode": "HTML", "disable_web_page_preview": True,
-    }).encode()
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        data=data, headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        print("Telegram:", r.status)
+        items.append(f'{i}. <a href="{html.escape(l["link"])}">{label}</a> - {sub}')
+    # Telegram caps messages at 4096 chars, so send in chunks of 20
+    for start in range(0, len(items), 20):
+        head = f"<b>{len(leads)} WhatsApp leads for {date.today()}</b> (part {start // 20 + 1})\n\n"
+        data = json.dumps({
+            "chat_id": chat, "text": head + "\n".join(items[start:start + 20]),
+            "parse_mode": "HTML", "disable_web_page_preview": True,
+        }).encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=data, headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            print("Telegram:", r.status)
 
 
 def main():
@@ -239,7 +254,7 @@ def main():
         sys.exit("No dated CSV files found. Pass a path: python whatsapp_outreach.py data/2026-11-08.csv")
 
     ids, phones, today_count = load_log()
-    need = DAILY_CAP - today_count
+    need = (DAILY_CAP - today_count) if DAILY_CAP else 10**9
     if need <= 0:
         sys.exit(f"Daily cap of {DAILY_CAP} already reached today.")
 
@@ -254,7 +269,7 @@ def main():
     send_telegram(leads)
     if not dry:
         append_log(leads)
-    print(f"Prepared {len(leads)} leads ({today_count} already done today, cap {DAILY_CAP}).")
+    print(f"Prepared {len(leads)} leads ({today_count} already done today, cap {DAILY_CAP or 'none'}).")
 
 
 if __name__ == "__main__":
