@@ -146,7 +146,7 @@ def load_log():
 
 
 def append_log(leads):
-    new_file = not os.path.exists(LOG_FILE)
+    new_file = not os.path.exists(LOG_FILE) or os.path.getsize(LOG_FILE) == 0
     with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new_file:
@@ -217,30 +217,64 @@ text-decoration:none;color:#111;box-shadow:0 1px 3px #0002}}
         f.write(page)
 
 
+def tg_post(token, payload):
+    """Send one Telegram message. Returns (ok, response_text)."""
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return True, str(r.status)
+    except urllib.error.HTTPError as e:
+        return False, e.read().decode("utf-8", "replace")
+    except Exception as e:  # network hiccup etc.
+        return False, str(e)
+
+
 def send_telegram(leads):
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat = os.environ.get("TELEGRAM_CHAT_ID")
     if not token or not chat:
         print("Telegram not configured, skipping.")
         return
-    items = []
-    for i, l in enumerate(leads, 1):
-        label = html.escape(clean_name(l["name"]) or "Seller")
-        sub = html.escape(" | ".join(x for x in (l["area"] or l["title"], fmt_price(l["price"])) if x))
-        items.append(f'{i}. <a href="{html.escape(l["link"])}">{label}</a> - {sub}')
+
+    def esc(x):
+        return html.escape(x, quote=False)
+
+    def item(i, l):
+        label = esc(clean_name(l["name"]) or "Seller")
+        sub = esc(" | ".join(x for x in (l["area"] or l["title"], fmt_price(l["price"])) if x))
+        href = l["link"].replace("&", "&amp;").replace('"', "&quot;")
+        return f'{i}. <a href="{href}">{label}</a> - {sub}'
+
+    items = [item(i, l) for i, l in enumerate(leads, 1)]
     # Telegram caps messages at 4096 chars, so send in chunks of 20
     for start in range(0, len(items), 20):
         head = f"<b>{len(leads)} WhatsApp leads for {date.today()}</b> (part {start // 20 + 1})\n\n"
-        data = json.dumps({
+        ok, resp = tg_post(token, {
             "chat_id": chat, "text": head + "\n".join(items[start:start + 20]),
             "parse_mode": "HTML", "disable_web_page_preview": True,
-        }).encode()
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data=data, headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=30) as r:
-            print("Telegram:", r.status)
+        })
+        if ok:
+            print("Telegram: ok")
+            continue
+        print("Telegram rejected a batch, sending one by one. Reason:", resp)
+        for j in range(start, min(start + 20, len(items))):
+            ok, resp = tg_post(token, {
+                "chat_id": chat, "text": items[j],
+                "parse_mode": "HTML", "disable_web_page_preview": True,
+            })
+            if not ok:
+                # last resort: plain text with the raw link
+                l = leads[j]
+                ok, resp = tg_post(token, {
+                    "chat_id": chat, "disable_web_page_preview": True,
+                    "text": f'{j + 1}. {clean_name(l["name"]) or "Seller"}: {l["link"]}',
+                })
+            if not ok:
+                print(f"Could not send lead {j + 1} to Telegram:", resp)
 
 
 def main():
