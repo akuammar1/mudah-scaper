@@ -6,6 +6,15 @@ on:
   # schedule:
   #   - cron: "0 2 * * *"
   workflow_dispatch:
+    inputs:
+      listing_type:
+        description: "What to scrape"
+        type: choice
+        options:
+          - both
+          - sale
+          - rent
+        default: both
 
 jobs:
   scrape:
@@ -25,6 +34,8 @@ jobs:
         run: pip install requests==2.32.3
 
       - name: Run scraper
+        env:
+          LISTING_TYPE: ${{ github.event.inputs.listing_type || 'both' }}
         run: python scraper.py
 
       - name: Commit CSV results
@@ -32,5 +43,5 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
-          git diff --cached --quiet || git commit -m "📦 Scrape: $(date +'%Y-%m-%d %H:%M')"
+          git diff --cached --quiet || git commit -m "📦 Scrape (${{ github.event.inputs.listing_type || 'both' }}): $(date +'%Y-%m-%d %H:%M')"
           git push
