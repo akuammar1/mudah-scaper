@@ -3,17 +3,20 @@
 Semi-automated WhatsApp outreach for the Mudah lead pipeline.
 
 What it does (no auto-sending, you tap send yourself):
-  1. Reads the newest dated daily CSV(s) from the scraper.
+  1. Reads the newest dated daily CSV(s) from the scraper (sale and/or rent).
   2. Skips anyone already in contacted.csv (by listing_id or phone).
   3. Picks up to DAILY_CAP new leads (cap counts what was already picked today).
-  4. Builds a wa.me link per lead with the message pre-filled.
+  4. Builds a wa.me link per lead with the right message (sale or rent) pre-filled.
   5. Writes outreach/index.html and sends the links to Telegram (if configured).
 
 Usage:
-  python whatsapp_outreach.py                 # auto-find dated CSVs
-  python whatsapp_outreach.py data/2026-11-08.csv
-  python whatsapp_outreach.py --dry-run       # don't write the contacted log
+  python whatsapp_outreach.py                      # auto-find dated CSVs, sale + rent
+  python whatsapp_outreach.py --type rent          # rent leads only
+  python whatsapp_outreach.py --type sale          # sale leads only
+  python whatsapp_outreach.py data/mudah_penang_rent_2026-11-20.csv
+  python whatsapp_outreach.py --dry-run            # don't write the contacted log
 """
+import argparse
 import csv
 import glob
 import html
@@ -22,6 +25,7 @@ import os
 import random
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date
@@ -30,7 +34,8 @@ DAILY_CAP = None  # None = no limit; set a number (e.g. 9) to cap per day
 LOG_FILE = "contacted.csv"
 OUT_DIR = "outreach"
 AGENT = "My name is Ammar Mirza Muazzam, a senior real estate agent from CCI Property, REN54406, under Muazzam Ali."
-MIN_PRICE = 50000  # skip listings priced below this (rentals, per-sqft, junk)
+MIN_PRICE = 50000      # SALE: skip listings priced below this (rentals, per-sqft, junk)
+MIN_RENT_PRICE = 500   # RENT: skip monthly rents below this (rooms, junk). Lower it to include rooms.
 SALUTATION = "Mr"  # set to "" to greet with the plain name instead
 
 # Possible column names in your CSV (first match wins). Edit if yours differ.
@@ -42,6 +47,7 @@ COLS = {
     "area": ["location", "area", "region", "subarea", "address"],
     "price": ["price", "asking_price", "price_rm"],
     "url": ["url", "link", "listing_url"],
+    "type": ["listing_type"],
 }
 
 # Names that are clearly not a person -> use a plain "Hi" instead.
@@ -50,7 +56,7 @@ NOT_A_NAME = {
     "properties", "hartanah", "team", "sales", "enquiry", "private", "user",
 }
 
-TEMPLATES = [
+SALE_TEMPLATES = [
     "{greet} I saw your ads on Mudah, {place}.{price_part} {agent} "
     "I have several buyers looking in this area right now and your "
     "property caught their eye. Is it still available? Are you interested?",
@@ -63,6 +69,22 @@ TEMPLATES = [
     "I've got buyers asking about properties in this area and yours looks "
     "like a good match. Is it still available? Are you interested?",
 ]
+
+RENT_TEMPLATES = [
+    "{greet} I saw your rental ad on Mudah, {place}.{price_part} {agent} "
+    "I have a few tenants looking for a property in this area right now. "
+    "Is it still available for rent? Are you interested?",
+
+    "{greet} I saw your rental ad on Mudah, {place}.{price_part} {agent} "
+    "I currently have some interested tenants for this kind of property. "
+    "Is it still available for rent? Are you interested?",
+
+    "{greet} I saw your rental ad on Mudah, {place}.{price_part} {agent} "
+    "I've got tenants asking about properties in this area and yours looks "
+    "like a good match. Is it still available for rent? Are you interested?",
+]
+
+TEMPLATES = {"sale": SALE_TEMPLATES, "rent": RENT_TEMPLATES}
 
 
 def pick(row, key):
@@ -104,29 +126,46 @@ def price_value(raw):
         return None
 
 
-def fmt_price(raw):
+def fmt_price(raw, ltype="sale"):
     raw = (raw or "").strip()
     if not raw:
         return ""
+    out = raw
     digits = re.sub(r"[^\d.]", "", raw)
     if digits and digits.replace(".", "", 1).isdigit() and "rm" not in raw.lower():
         try:
-            return f"RM{int(float(digits)):,}"
+            out = f"RM{int(float(digits)):,}"
         except ValueError:
             pass
-    return raw if raw.lower().startswith("rm") else f"RM{raw}"
+    else:
+        out = raw if raw.lower().startswith("rm") else f"RM{raw}"
+    if ltype == "rent" and not re.search(r"month|/\s*mo|mth", out, re.I):
+        out += "/month"
+    return out
+
+
+def file_type(path, row):
+    """sale or rent: from the listing_type column, else from the file name."""
+    t = pick(row, "type").lower()
+    if t in ("sale", "rent"):
+        return t
+    return "rent" if "rent" in os.path.basename(path).lower() else "sale"
 
 
 def build_message(lead):
+    ltype = lead["type"]
     name = clean_name(lead["name"])
     if name:
         greet = f"Hi {SALUTATION} {name}.".replace("  ", " ")
     else:
         greet = "Hi,"
     place = lead["area"] or lead["title"] or "your property"
-    price = fmt_price(lead["price"])
-    price_part = f" Pricing at {price}." if price else ""
-    return random.choice(TEMPLATES).format(
+    price = fmt_price(lead["price"], ltype)
+    if price:
+        price_part = f" Rental at {price}." if ltype == "rent" else f" Pricing at {price}."
+    else:
+        price_part = ""
+    return random.choice(TEMPLATES[ltype]).format(
         greet=greet, place=place, price_part=price_part, agent=AGENT
     )
 
@@ -164,15 +203,19 @@ def find_csvs():
     return sorted(files, key=lambda p: re.search(r"\d{4}-\d{2}-\d{2}", p).group(), reverse=True)
 
 
-def collect(files, ids, phones, need):
+def collect(files, ids, phones, need, want="both"):
     leads, seen = [], set()
     for path in files:
         with open(path, newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
+                ltype = file_type(path, row)
+                if want != "both" and ltype != want:
+                    continue
                 phone = norm_phone(pick(row, "phone"))
                 lid = pick(row, "id") or (phone or "")
                 pv = price_value(pick(row, "price"))
-                if pv is not None and pv < MIN_PRICE:
+                floor = MIN_RENT_PRICE if ltype == "rent" else MIN_PRICE
+                if pv is not None and pv < floor:
                     continue
                 if not phone or lid in ids or phone in phones or phone in seen:
                     continue
@@ -181,6 +224,7 @@ def collect(files, ids, phones, need):
                     "id": lid, "phone": phone, "name": pick(row, "name"),
                     "title": pick(row, "title"), "area": pick(row, "area"),
                     "price": pick(row, "price"), "url": pick(row, "url"),
+                    "type": ltype,
                 })
                 if len(leads) >= need:
                     return leads
@@ -191,15 +235,20 @@ def wa_link(phone, message):
     return f"https://wa.me/{phone}?text={urllib.parse.quote(message)}"
 
 
+def tag(l):
+    return "RENT" if l["type"] == "rent" else "SALE"
+
+
 def write_html(leads):
     os.makedirs(OUT_DIR, exist_ok=True)
     rows = []
     for i, l in enumerate(leads, 1):
         label = html.escape(clean_name(l["name"]) or "Seller")
-        sub = html.escape(" | ".join(x for x in (l["area"] or l["title"], fmt_price(l["price"])) if x))
+        sub = html.escape(" | ".join(
+            x for x in (l["area"] or l["title"], fmt_price(l["price"], l["type"])) if x))
         rows.append(
             f'<a class="card" href="{html.escape(l["link"])}">'
-            f'<b>{i}. {label}</b><span>{sub}</span><em>Open in WhatsApp</em></a>'
+            f'<b>{i}. [{tag(l)}] {label}</b><span>{sub}</span><em>Open in WhatsApp</em></a>'
         )
     page = f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -245,14 +294,18 @@ def send_telegram(leads):
 
     def item(i, l):
         label = esc(clean_name(l["name"]) or "Seller")
-        sub = esc(" | ".join(x for x in (l["area"] or l["title"], fmt_price(l["price"])) if x))
+        sub = esc(" | ".join(
+            x for x in (l["area"] or l["title"], fmt_price(l["price"], l["type"])) if x))
         href = l["link"].replace("&", "&amp;").replace('"', "&quot;")
-        return f'{i}. <a href="{href}">{label}</a> - {sub}'
+        return f'{i}. [{tag(l)}] <a href="{href}">{label}</a> - {sub}'
 
+    n_rent = sum(1 for l in leads if l["type"] == "rent")
+    n_sale = len(leads) - n_rent
     items = [item(i, l) for i, l in enumerate(leads, 1)]
     # Telegram caps messages at 4096 chars, so send in chunks of 20
     for start in range(0, len(items), 20):
-        head = f"<b>{len(leads)} WhatsApp leads for {date.today()}</b> (part {start // 20 + 1})\n\n"
+        head = (f"<b>{len(leads)} WhatsApp leads for {date.today()}</b> "
+                f"({n_sale} sale, {n_rent} rent) (part {start // 20 + 1})\n\n")
         ok, resp = tg_post(token, {
             "chat_id": chat, "text": head + "\n".join(items[start:start + 20]),
             "parse_mode": "HTML", "disable_web_page_preview": True,
@@ -271,25 +324,30 @@ def send_telegram(leads):
                 l = leads[j]
                 ok, resp = tg_post(token, {
                     "chat_id": chat, "disable_web_page_preview": True,
-                    "text": f'{j + 1}. {clean_name(l["name"]) or "Seller"}: {l["link"]}',
+                    "text": f'{j + 1}. [{tag(l)}] {clean_name(l["name"]) or "Seller"}: {l["link"]}',
                 })
             if not ok:
                 print(f"Could not send lead {j + 1} to Telegram:", resp)
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    dry = "--dry-run" in sys.argv
-    files = args or find_csvs()
+    ap = argparse.ArgumentParser(description="WhatsApp outreach for Mudah leads")
+    ap.add_argument("files", nargs="*", help="CSV file(s); default: auto-find dated CSVs")
+    ap.add_argument("--type", choices=["sale", "rent", "both"], default="both",
+                    help="which listing type to pick leads from (default: both)")
+    ap.add_argument("--dry-run", action="store_true", help="don't write the contacted log")
+    args = ap.parse_args()
+
+    files = args.files or find_csvs()
     if not files:
-        sys.exit("No dated CSV files found. Pass a path: python whatsapp_outreach.py data/2026-11-08.csv")
+        sys.exit("No dated CSV files found. Pass a path: python whatsapp_outreach.py data/mudah_penang_2026-11-08.csv")
 
     ids, phones, today_count = load_log()
     need = (DAILY_CAP - today_count) if DAILY_CAP else 10**9
     if need <= 0:
         sys.exit(f"Daily cap of {DAILY_CAP} already reached today.")
 
-    leads = collect(files, ids, phones, need)
+    leads = collect(files, ids, phones, need, args.type)
     if not leads:
         sys.exit("No new leads left (everyone is already in contacted.csv).")
 
@@ -298,7 +356,7 @@ def main():
 
     write_html(leads)
     send_telegram(leads)
-    if not dry:
+    if not args.dry_run:
         append_log(leads)
     print(f"Prepared {len(leads)} leads ({today_count} already done today, cap {DAILY_CAP or 'none'}).")
 
