@@ -18,37 +18,53 @@ HEADERS = {
 }
 
 # ── Config ───────────────────────────────────────────────────────────────────
-BASE_URL      = "https://www.mudah.my/penang/properties-for-sale"
 MAX_PAGES     = 50     # stops automatically when a page comes back empty
 SLEEP_BETWEEN = 5      # seconds between pages
 RETRY_WAIT    = 60     # seconds to wait after a 429 (rate limit)
 
-OUTPUT_DIR  = "data"
-TODAY       = datetime.now().strftime("%Y-%m-%d")
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"mudah_penang_{TODAY}.csv")
-MASTER_FILE = os.path.join(OUTPUT_DIR, "mudah_penang_all.csv")
+# What to scrape: "sale", "rent" or "both". Set by the workflow dropdown.
+LISTING_TYPE = os.environ.get("LISTING_TYPE", "both").strip().lower()
+
+OUTPUT_DIR = "data"
+TODAY      = datetime.now().strftime("%Y-%m-%d")
+
+# One entry per listing type. Sale files keep their original names.
+SOURCES = {
+    "sale": {
+        "base_url": "https://www.mudah.my/penang/properties-for-sale",
+        "daily":    f"mudah_penang_{TODAY}.csv",
+        "master":   "mudah_penang_all.csv",
+    },
+    "rent": {
+        # If this URL does not load, swap in a category page such as
+        # https://www.mudah.my/penang/houses-for-rent
+        "base_url": "https://www.mudah.my/penang/properties-for-rent",
+        "daily":    f"mudah_penang_rent_{TODAY}.csv",
+        "master":   "mudah_penang_rent_all.csv",
+    },
+}
 
 # Master file keeps everything (internal use)
 CSV_FIELDS = [
     "listing_id", "title", "price", "price_numeric", "price_range",
     "location", "state", "beds", "baths", "size_sqft",
     "property_type", "title_type", "seller_name", "phone",
-    "url", "scraped_at",
+    "url", "scraped_at", "listing_type",
 ]
 
 # Daily output file: clean columns only
 OUTPUT_FIELDS = [
     "title", "price", "location",
     "beds", "baths", "size_sqft", "property_type", "title_type",
-    "seller_name", "phone", "url",
+    "seller_name", "phone", "url", "listing_type",
 ]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-def page_url(page):
+def page_url(base_url, page):
     if page == 1:
-        return f"{BASE_URL}?adsby=false"
-    return f"{BASE_URL}?adsby=false&o={page}"
+        return f"{base_url}?adsby=false"
+    return f"{base_url}?adsby=false&o={page}"
 
 
 def price_bucket(price_numeric):
@@ -62,6 +78,15 @@ def price_bucket(price_numeric):
     lower = (price_numeric // 100_000) * 100_000
     upper = lower + 100_000
     return f"RM{int(lower / 1000)}k-{int(upper / 1000)}k"
+
+
+def rent_bucket(rent_numeric):
+    """Monthly rent label like 'RM3000-3500' (RM500 steps, RM1000 steps from RM5000)."""
+    if rent_numeric is None or rent_numeric <= 0:
+        return "Unknown"
+    step = 500 if rent_numeric < 5000 else 1000
+    lower = (rent_numeric // step) * step
+    return f"RM{lower}-{lower + step}"
 
 
 def sort_by_price(rows):
@@ -204,8 +229,8 @@ def print_diagnostics(html):
             shown += 1
 
 
-def fetch_page(page):
-    url = page_url(page)
+def fetch_page(base_url, page, listing_type):
+    url = page_url(base_url, page)
     print(f"  🌐 {url}")
     resp = fetch_with_retry(url)
     if resp is None:
@@ -218,12 +243,13 @@ def fetch_page(page):
         return []
 
     print(f"     ✅ Found {len(ads)} ads via: {method}")
-    return parse_ads(ads)
+    return parse_ads(ads, listing_type)
 
 
-def parse_ads(ads):
+def parse_ads(ads, listing_type="sale"):
     results = []
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    bucket = rent_bucket if listing_type == "rent" else price_bucket
 
     for ad in ads:
         try:
@@ -248,7 +274,7 @@ def parse_ads(ads):
                 "title":         a.get("subject", "N/A"),
                 "price":         a.get("priceLabel", str(a.get("price", "N/A"))),
                 "price_numeric": price_numeric if price_numeric is not None else "",
-                "price_range":   price_bucket(price_numeric),
+                "price_range":   bucket(price_numeric),
                 "location":      a.get("locationLabel") or a.get("subareaName", "N/A"),
                 "state":         a.get("regionName", "Penang"),
                 "beds":          str(a.get("roomsName", "N/A")),
@@ -260,6 +286,7 @@ def parse_ads(ads):
                 "phone":         phone,
                 "url":           a.get("adviewUrl", f"https://www.mudah.my/ad/{ad.get('id')}.htm"),
                 "scraped_at":    now,
+                "listing_type":  listing_type,
             })
         except Exception as e:
             print(f"     ⚠️  Skipped ad: {e}")
@@ -284,20 +311,43 @@ def save_csv(filepath, rows, fields, mode="w"):
         writer.writerows(rows)
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-def main():
-    print(f"\n🏠 Mudah Penang Property Scraper — {TODAY}")
-    print("=" * 50)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+def ensure_schema(filepath, fields, defaults):
+    """Upgrade an older CSV in place if it lacks newer columns (e.g. listing_type).
+    Without this, appending new rows under an old header would shift columns."""
+    if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+        return
+    with open(filepath, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        old_fields = reader.fieldnames or []
+        if all(c in old_fields for c in fields):
+            return
+        rows = list(reader)
+    for r in rows:
+        for k, v in defaults.items():
+            if not r.get(k):
+                r[k] = v
+    save_csv(filepath, rows, fields, mode="w")
+    print(f"🔧 Upgraded {filepath} with new columns")
 
-    existing_ids = load_existing_ids(MASTER_FILE)
-    print(f"📂 Known listings in master: {len(existing_ids)}\n")
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+def run_type(listing_type):
+    """Scrape one listing type. Returns the number of listings scraped."""
+    cfg = SOURCES[listing_type]
+    daily_file  = os.path.join(OUTPUT_DIR, cfg["daily"])
+    master_file = os.path.join(OUTPUT_DIR, cfg["master"])
+    label = listing_type.upper()
+
+    print(f"\n━━━ {label} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    ensure_schema(master_file, CSV_FIELDS, {"listing_type": listing_type})
+    existing_ids = load_existing_ids(master_file)
+    print(f"📂 Known {listing_type} listings in master: {len(existing_ids)}\n")
 
     all_listings = []
     for page in range(1, MAX_PAGES + 1):
         print(f"\n  📄 Page {page}/{MAX_PAGES}")
         try:
-            items = fetch_page(page)
+            items = fetch_page(cfg["base_url"], page, listing_type)
             if items is None:
                 print("     🛑 Stopping due to rate limit")
                 break
@@ -315,20 +365,51 @@ def main():
         time.sleep(SLEEP_BETWEEN)
 
     if not all_listings:
-        print("\n🛑 ZERO listings scraped. See the diagnostic lines above (HTTP status / page title / JSON keys).")
-        sys.exit(1)
+        print(f"\n🛑 ZERO {listing_type} listings scraped. See the diagnostic lines above (HTTP status / page title / JSON keys).")
+        return 0
 
-    new = [l for l in all_listings if l["listing_id"] not in existing_ids and l["listing_id"] != "N/A"]
-    print(f"\n📦 Scraped: {len(all_listings)} | New: {len(new)}")
+    seen = set()
+    new = []
+    for l in all_listings:
+        lid = l["listing_id"]
+        if lid == "N/A" or lid in existing_ids or lid in seen:
+            continue
+        seen.add(lid)
+        new.append(l)
+    print(f"\n📦 {label} scraped: {len(all_listings)} | New: {len(new)}")
 
     if new:
-        save_csv(OUTPUT_FILE, sort_by_price(new), fields=OUTPUT_FIELDS, mode="w")
-        save_csv(MASTER_FILE, new, fields=CSV_FIELDS, mode="a")
-        print(f"💾 Daily  → {OUTPUT_FILE}  ({len(new)} rows, sorted cheapest → highest)")
-        print(f"💾 Master → {MASTER_FILE}")
+        save_csv(daily_file, sort_by_price(new), fields=OUTPUT_FIELDS, mode="w")
+        save_csv(master_file, new, fields=CSV_FIELDS, mode="a")
+        print(f"💾 Daily  → {daily_file}  ({len(new)} rows, sorted cheapest → highest)")
+        print(f"💾 Master → {master_file}")
     else:
-        save_csv(OUTPUT_FILE, [], fields=OUTPUT_FIELDS, mode="w")
-        print("ℹ️  No new listings.")
+        save_csv(daily_file, [], fields=OUTPUT_FIELDS, mode="w")
+        print(f"ℹ️  No new {listing_type} listings.")
+
+    return len(all_listings)
+
+
+def main():
+    if LISTING_TYPE not in ("sale", "rent", "both"):
+        sys.exit(f"LISTING_TYPE must be sale, rent or both (got '{LISTING_TYPE}')")
+
+    types = ["sale", "rent"] if LISTING_TYPE == "both" else [LISTING_TYPE]
+    print(f"\n🏠 Mudah Penang Property Scraper — {TODAY} ({', '.join(types)})")
+    print("=" * 50)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    counts = {}
+    for i, t in enumerate(types):
+        if i > 0:
+            time.sleep(SLEEP_BETWEEN)
+        counts[t] = run_type(t)
+
+    empty = [t for t, n in counts.items() if n == 0]
+    if len(empty) == len(types):
+        sys.exit(1)   # everything failed
+    if empty:
+        print(f"\n⚠️  Nothing scraped for: {', '.join(empty)} (the other type was saved)")
 
     print("\n✅ Done!\n")
 
