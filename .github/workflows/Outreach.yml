@@ -2,6 +2,15 @@ name: WhatsApp outreach
 
 on:
   workflow_dispatch:
+    inputs:
+      listing_type:
+        description: "Which leads to prepare"
+        type: choice
+        options:
+          - both
+          - sale
+          - rent
+        default: both
 
 concurrency:
   group: outreach
@@ -21,7 +30,7 @@ jobs:
           python-version: "3.12"
 
       - name: Prepare today's leads
-        run: python whatsapp_outreach.py
+        run: python whatsapp_outreach.py --type "${{ github.event.inputs.listing_type || 'both' }}"
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
